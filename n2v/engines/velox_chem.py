@@ -16,9 +16,9 @@ except ImportError:
 
 if has_vlx:
     from ..grid import vlxGrider
-    class PySCFEngine(Engine):
+    class veloxchemEngine(Engine):
         """
-        PySCF Engine
+        Veloxchem Engine
         """
 
         def set_system(self, molecule, basis, ref=1, pbs='same'):
