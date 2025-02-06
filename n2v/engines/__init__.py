@@ -10,7 +10,17 @@ try:
 except ImportError:
     has_psi4 = False
 
+try:
+    import veloxchem
+    has_veloxchem = True
+except ImportError:
+    has_veloxchem = False
+
+
 if has_pyscf:
     from .pyscf import PySCFEngine
 if has_psi4:
     from .psi4 import Psi4Engine
+
+if has_veloxchem:
+    from .veloxchem import VeloxchemEngine

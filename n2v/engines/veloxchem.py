@@ -9,16 +9,16 @@ from opt_einsum import contract
 from .engine import Engine
 
 try:
-    import veloxchem as vlx
-    has_vlx = True
+    from pyscf import gto, dft
+    has_pyscf = True
 except ImportError:
-    has_vlx = False
+    has_pyscf = False
 
-if has_vlx:
-    from ..grid import vlxGrider
-    class veloxchemEngine(Engine):
+if has_pyscf:
+    from ..grid import PySCFGrider
+    class VeloxchemEngine(Engine):
         """
-        Veloxchem Engine
+        PySCF Engine
         """
 
         def set_system(self, molecule, basis, ref=1, pbs='same'):
