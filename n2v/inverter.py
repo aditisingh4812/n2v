@@ -88,8 +88,11 @@ class Inverter(Direct, ZMP, WuYang, PDECO, OC, MRKS):
         elif engine.lower() == 'pyscf':
             from .engines import PySCFEngine
             self.eng = PySCFEngine()
+        elif engine.lower() == 'veloxchem':
+            from .engines import VeloxchemEngine
+            self.eng = VeloxchemEngine()
         else:
-            raise ValueError("Engine name is incorrect. The availiable engines are: {psi4, pyscf}")
+            raise ValueError("Engine name is incorrect. The availiable engines are: {psi4, pyscf,veloxchem}")
             
     def __repr__( self ):
         return "n2v.Inverter"

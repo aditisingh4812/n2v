@@ -4,7 +4,6 @@ zmp.py
 Functions associated with zmp inversion
 """
 
-
 import psi4
 psi4.core.be_quiet()
 import numpy as np

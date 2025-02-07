@@ -1,160 +1,215 @@
 """
-grider_pyscf.py
-Grider for PyScf
+grider_veloxchem.py
+Grider for VeloxChem
 """
-from gbasis.evals.density import (evaluate_density, 
-#                                  evaluate_posdef_kinetic_energy_density,
-                                  evaluate_density_laplacian,
-                                  evaluate_density_gradient,
- #                                 evaluate_general_kinetic_energy_density,
-                                )
+import veloxchem 
+from gbasis.evals.density import (
+    evaluate_density,
+    evaluate_density_laplacian,
+    evaluate_density_gradient,
+)
 from gbasis.evals.eval import evaluate_basis
 from gbasis.evals.eval_deriv import evaluate_deriv_basis
 from gbasis.evals.electrostatic_potential import point_charge_integral
-from gbasis.wrappers import from_pyscf
 
-# from grid.molgrid import MolGrid
-# from grid.onedgrid import GaussLaguerre,  GaussLegendre, HortonLinear
-# from grid.becke import BeckeWeights
 
 import numpy as np
 from opt_einsum import contract
 
 try:
-    from pyscf import dft
-    has_pyscf = True
+    import veloxchem
+    has_veloxchem = True
 except ImportError:
-    has_pyscf = False
+    has_veloxchem = False
 
-if has_pyscf:
-    class PySCFGrider:
+if has_veloxchem:
+    import veloxchem as vlx
+    import numpy as np
+    from gbasis.evals.eval import evaluate_basis
+    from gbasis.evals.electrostatic_potential import point_charge_integral
+
+    class VeloxchemGrider:
         """
-        PySCF Grider Class
-        Provides methods to obtain components on the grid using the package gbasis
+        Veloxchem Grider Class
+        Provides methods to obtain components on the grid using the package gbasis.
         """
-        def __init__(self, mol, pbs_mol):
-
-            self.mol   = mol
-            self.basis = from_pyscf(mol)
-            self.pbs   = from_pyscf(pbs_mol) if pbs_mol is not None else None
-            self.atomic_charges = self.mol.atom_charges()
-            self.atomic_coords  = self.mol.atom_coords()
-
-            # Perform quick LDA calculation. Generates grid. 
-            mf = dft.UKS(self.mol)
-            mf.xc = 'svwn'
-            mf.kernel()
-            self.spherical_points = mf.grids().coords
-            self.w                = mf.grids().weights
-            self.mf = mf
-
-            # # Build spherical grid using \textit{grid}
-            # rad          = GaussLaguerre(70)
-            # becke = BeckeWeights(order=3)
-            # grid = MolGrid.from_preset( self.atomic_charges,
-            #                             self.atomic_coords, 
-            #                             rad,
-            #                             ['fine' for i in range(len(self.atomic_charges))],
-            #                             becke )
-            
-            # self.spherical_points = grid.points
-            # self.w                = grid.weights
-
-            # Build rectangular grid
-            self.rectangular_grid   = None
-
-        def assert_grid(self, grid):
-            if grid == 'spherical':
-                points = self.spherical_points
-            elif grid == 'rectangular':
-                assert self.rectangular_grid is not None, "Rectangular Grid must be defined first"
-                points = self.rectangular_grid
-            else: 
-                raise ValueError("Specify either spherical or rectangular grid")
-        
-            return points
-
-        def generate_grid(self, x, y, z):
+        def __init__(self, mol, pbs_mol=None, basis_str=None, basis_file=None):
             """
-            Genrates Mesh from 3 separate linear spaces and flatten,
-            needed for cubic grid.
+            Initializes the Grider for VeloxChem with either a string or file-based basis set.
+
             Parameters
             ----------
-            grid: tuple of three np.ndarray
-                (x, y, z)
+            mol : veloxchem.Molecule
+                The molecule object representing the molecular system.
+            pbs_mol : veloxchem.Molecule, optional
+                The molecule object for the potential basis set (default is None).
+            basis_str : str, optional
+                A user-defined basis set string (default is None).
+            basis_file : str, optional
+                A file containing the basis set data (default is None).
+            """
+            self.mol = mol
+            
+            # Handle user-defined basis set
+            if basis_str:
+                self.basis = vlx.MolecularBasis.read_from_string(basis_str, mol)
+            elif basis_file:
+                self.basis = vlx.MolecularBasis.read_from_file(basis_file, mol)
+            else:
+                self.basis = vlx.MolecularBasis.read(mol, "def2-SVP")  # Default to def2-SVP if no input provided
+            
+            self.pbs = vlx.MolecularBasis.read(pbs_mol, "def2-SVP") if pbs_mol else None
+
+            self.atomic_charges = self.mol.nuclear_charges()
+            self.atomic_coords = self.mol.nuclear_coordinates()
+
+            # Perform a quick LDA calculation to generate density matrices.
+            scf_drv = vlx.ScfRestrictedDriver()
+            self.scf_results = scf_drv.compute(mol, self.basis)
+
+            # Extract density matrix from SCF results
+            self.Da = self.scf_results.density.alpha
+
+            # Generate a uniform rectangular grid manually
+            self.rectangular_grid, self.w = self.generate_grid()
+
+        def generate_grid(self, grid_spacing=0.2):
+            """
+            Generates a simple rectangular grid.
+            """
+            min_bounds = np.min(self.atomic_coords, axis=0) - 2.0
+            max_bounds = np.max(self.atomic_coords, axis=0) + 2.0
+
+            x = np.arange(min_bounds[0], max_bounds[0], grid_spacing)
+            y = np.arange(min_bounds[1], max_bounds[1], grid_spacing)
+            z = np.arange(min_bounds[2], max_bounds[2], grid_spacing)
+
+            grid_points = np.array(np.meshgrid(x, y, z)).T.reshape(-1, 3)
+            weights = np.full(len(grid_points), grid_spacing**3)
+
+            return grid_points, weights
+
+        def assert_grid(self, grid_type):
+            """
+            Asserts the type of grid (spherical or rectangular) and returns the corresponding points.
+            Parameters
+            ----------
+            grid_type : str
+            The type of grid to use ('spherical' or 'rectangular').
             Returns
             -------
-            grid: np.ndarray
-                shape (3, len(x)*len(y)*len(z)).
+            np.ndarray
+            The grid points corresponding to the requested grid type.
+            Raises
+            ------
+            ValueError
+            If the grid type is not recognized or if the rectangular grid is not defined.
             """
-            # x,y,z, = grid
+            if grid_type == 'spherical':
+             # VeloxChem stores spherical grid points, so return them here.
+             points = self.spherical_points
+            elif grid_type == 'rectangular':
+             if self.rectangular_grid is None:
+              raise ValueError("Rectangular grid must be defined first. Please generate the grid before accessing it.")
+             # Return the rectangular grid points.
+             points = self.rectangular_grid
+            else:
+              raise ValueError("Invalid grid type specified. Use either 'spherical' or 'rectangular'.")
+            return points
+        def generate_grid(self, x, y, z):
+            """
+            Generates a cubic mesh grid from 3 separate linear spaces (x, y, z),
+            and flattens the result into a 2D array.
+            Parameters
+            ----------
+            x : np.ndarray
+            The 1D array of x coordinates.
+            y : np.ndarray
+            The 1D array of y coordinates.
+            z : np.ndarray
+            The 1D array of z coordinates.
+            Returns
+            -------
+            grid : np.ndarray
+            A 2D array of shape (3, len(x)*len(y)*len(z)) containing the mesh points.
+            shape : tuple
+            A tuple containing the shape (len(x), len(y), len(z)) for the mesh grid.
+            """
+            # Generate a meshgrid from x, y, z using 'ij' indexing (which is typical for Cartesian grids)
             shape = (len(x), len(y), len(z))
-            X,Y,Z = np.meshgrid(x, y, z, indexing='ij')
-            X = X.reshape((X.shape[0] * X.shape[1] * X.shape[2], 1))
-            Y = Y.reshape((Y.shape[0] * Y.shape[1] * Y.shape[2], 1))
-            Z = Z.reshape((Z.shape[0] * Z.shape[1] * Z.shape[2], 1))
-            grid = np.concatenate((X,Y,Z), axis=1).T
-
+            X, Y, Z = np.meshgrid(x, y, z, indexing='ij')
+            # Flatten the meshgrid coordinates
+            X = X.reshape((-1, 1))  # Reshape to (num_points, 1)
+            Y = Y.reshape((-1, 1))  # Reshape to (num_points, 1)
+            Z = Z.reshape((-1, 1))  # Reshape to (num_points, 1)
+            # Concatenate the X, Y, Z coordinates to create a grid
+            grid = np.concatenate((X, Y, Z), axis=1).T  # Shape: (3, num_points)
             return grid, shape
-
-        def build_rectangular(self, npoints):
+        def build_rectangular(self, npoints, overage=3.0):
             """
-            Builds rectangular grid containing molecule
-
+            Builds a rectangular grid that encompasses the molecule.
             Parameters
             ----------
             npoints: tuple
-                Number of points per dimension (n_x, n_y, n_z)
+            Number of points per dimension (n_x, n_y, n_z)
             overage: float
-                Spacial extent of box
-
+            Spatial extent to extend the grid around the molecule (default: 3.0 Å)
             """
-
-            # xmin, xmax = np.min(self.atomic_coords[:,0])+3, np.max(self.atomic_coords[:,0])+3
-            # ymin, ymax = np.min(self.atomic_coords[:,1])+3, np.max(self.atomic_coords[:,0])+3
-            # zmin, zmax = np.min(self.atomic_coords[:,2])+3, np.max(self.atomic_coords[:,0])+3
-            
-            g1 = np.linspace(-10, 10, npoints[0])
-            g2 = np.linspace(0, 0, npoints[1])
-            g3 = np.linspace(0, 0, npoints[2])
-            gx, gy, gz = np.meshgrid(g1, g2, g3)
-            g3d = np.vstack( [gx.ravel(), gy.ravel(), gz.ravel()] ).T
-
-            self.x                = g1
-            self.y                = g2
-            self.z                = g3
+            # Get the atomic coordinates of the molecule
+            atom_coords = self.mol.atom_coords()
+            # Determine the minimum and maximum values for each dimension (x, y, z)
+            xmin, xmax = np.min(atom_coords[:, 0]), np.max(atom_coords[:, 0])
+            ymin, ymax = np.min(atom_coords[:, 1]), np.max(atom_coords[:, 1])
+            zmin, zmax = np.min(atom_coords[:, 2]), np.max(atom_coords[:, 2])
+            # Add the overage (padding) around the molecule's bounding box
+            xmin -= overage
+            xmax += overage
+            ymin -= overage
+            ymax += overage
+            zmin -= overage
+            zmax += overage
+            # Generate equally spaced points in each dimension
+            x_grid = np.linspace(xmin, xmax, npoints[0])
+            y_grid = np.linspace(ymin, ymax, npoints[1])
+            z_grid = np.linspace(zmin, zmax, npoints[2])
+            # Create the 3D meshgrid
+            gx, gy, gz = np.meshgrid(x_grid, y_grid, z_grid)
+            # Flatten the meshgrid into a 2D array (each row is a 3D point)
+            g3d = np.vstack([gx.ravel(), gy.ravel(), gz.ravel()]).T
+            # Store the grid and the grid extents
+            self.x = x_grid
+            self.y = y_grid
+            self.z = z_grid
             self.rectangular_grid = g3d
-
         def density(self, Da, Db=None, grid='spherical'):
             """
-            Computes density on grid. 
-
+            Computes the density on the grid.
             Parameters
             ----------
-
-            density: np.ndarray.
-                Density in AO basis
-
-            grid: str.
-                Type of grid used. Default spherical 
-                If 'rectangular' used self.rectangular_grid != None 
-
+            Da : np.ndarray
+            Density matrix in AO basis for alpha electrons.
+            Db : np.ndarray, optional
+            Density matrix in AO basis for beta electrons (only used if provided).
+            grid : str, optional
+            Type of grid to use. Default is 'spherical'. If 'rectangular' is chosen,
+            `self.rectangular_grid` must be defined.
             Returns
             -------
-            density_g: np.ndarray
-                Density on the requested grid    
+            density_g : np.ndarray
+            Density on the requested grid.
             """
-
+            # Ensure the grid is valid and fetch the grid points
             points = self.assert_grid(grid)
-
+            # Evaluate the density using the provided density matrices and basis
             density_a = evaluate_density(Da, self.basis, points)
+            # If beta density is provided, compute density for both alpha and beta
             if Db is not None:
-                density_b = evaluate_density(Db, self.basis, points)
-                density_g = np.concatenate([density_a, density_b])
-                return density_g
+             density_b = evaluate_density(Db, self.basis, points)
+             density_g = np.concatenate([density_a, density_b])
+             return density_g
             else:
-                return density_a
-
+            # If no beta density is provided, return only alpha density
+             return density_a
         def hartree(self, density, grid='spherical'):
             """
             Computes Hartree Potential on grid. 
