@@ -15,15 +15,16 @@ except ImportError:
     
 if has_veloxchem:
     from ..grid import VeloxchemGrider
+    from veloxchem import GridDriver, XCIntegrator
 class VeloxchemEngine(Engine):
        def __init__(self, engine='veloxchem', ref=1):
         self.engine = engine
         self.ref = ref  # Initialize the reference type (1 for restricted, 2 for unrestricted)
         # Other initializations
-       """
-       Veloxchem Engine Class
-       """
-       def set_system(self, xyz_string, basis, ref=1, pbs='same'):
+        """
+        Veloxchem Engine Class
+        """
+       def set_system(self, xyz_string, basis, ref=1, pbs='same',scf_results=None):
         print(f"Basis being used: {basis}, Type: {type(basis)}")
         """
         Initializes geometry and basis information.
@@ -37,6 +38,8 @@ class VeloxchemEngine(Engine):
             Reference: Restricted (1) or Unrestricted (2).
         pbs: str
             Basis set for potential used (default: same as `basis`).
+        scf_results: dict, optional (default=None)
+        SCF results returned from VeloxChem (from `scf_drv.compute()`) to avoid recomputation.
         """
         # Define the molecule
         self.mol = veloxchem.Molecule.read_xyz_string(xyz_string)
@@ -63,7 +66,12 @@ class VeloxchemEngine(Engine):
             self.scf_drv = veloxchem.ScfRestrictedDriver()
         else:
             self.scf_drv = veloxchem.ScfUnrestrictedDriver()  # Use unrestricted driver if ref=2
-        self.scf_results = self.scf_drv.compute(self.mol, self.basis)
+        if scf_results is None:
+          print("Performing SCF calculation...")
+          self.scf_results = self.scf_drv.compute(self.mol, self.basis)
+        else:
+          print("Using provided SCF results.")
+          self.scf_results = scf_results
         print("this is done")
        def initialize(self):
         """
@@ -108,7 +116,7 @@ class VeloxchemEngine(Engine):
 
         """Overlap matrix in AO basis"""
         return veloxchem.OverlapIntegralsDriver().compute(self.mol,self.basis).to_numpy()
-       def get_S3(self):
+       def get_S3(self, grid_level=4):
         """
         Builds the 3-index overlap matrix.
         Manually built since VeloxChem (like PySCF) may not support it directly.
@@ -118,26 +126,33 @@ class VeloxchemEngine(Engine):
         Shape: (nbf, nbf, nbf) if using the same basis for all integrals,
                 or (nbf, nbf, npbs) if a separate potential basis is used.
         """
-        print(f"Type of self.basis: {type(self.basis)}")
-        print(f"Does self.basis have eval_ao method? {hasattr(self.basis, 'eval_ao')}")
 
-        # Use the grid provided by your VeloxchemGrider (assumed to be already built)
-        coords   = self.grid.coords    # array of grid points
-        weights  = self.grid.weights   # corresponding integration weights
-        # Evaluate the atomic orbital (AO) basis functions on the grid.
-        # Here, it is assumed that self.basis provides an eval_ao() method.
-        bs1 = self.basis.eval_ao(coords)
+        # Step 1: Generate the grid using VeloxChem
+        grid_drv = GridDriver()
+        grid_drv.set_level(grid_level)  # Adjust the grid density level (1-8, default is 4)
+        molgrid = grid_drv.generate(self.mol)  # Generate molecular grid
+        x_coords = molgrid.x_to_numpy()  # Get x coordinates as a NumPy array
+        y_coords = molgrid.y_to_numpy()  # Get y coordinates as a NumPy array
+        z_coords = molgrid.z_to_numpy()  # Get z coordinates as a NumPy array
+        coords = np.vstack((x_coords, y_coords, z_coords)).T  # Combine into a single array of coordinates
+        weights = molgrid.w_to_numpy()  # Extract integration weights
+        # Step 2: Compute AO basis functions on the grid
+        xc_drv = XCIntegrator()
+        bs1 = xc_drv.compute_gto_values(self.mol, self.basis, molgrid)  # Correct AO evaluation
+        bs2 = xc_drv.compute_gto_values(self.mol, self.pbs, molgrid)
+        print(f"Shape of bs1: {bs1.shape}")
+        print(f"Shape of bs2: {bs2.shape}")
+        print(f"Shape of weights: {weights.shape}")
+        # Ensure shapes are correct for contraction
+        bs1 = bs1.T  # Reshape so that bs1 is (num_points, nbf), num_points = 2
+        bs2 = bs2.T  # Reshape bs2 similarly if it's not already
+        weights = weights.reshape(-1)  # Ensure weights is a 1D array (size should be the same as num_points)
+        # Step 3: Compute 3-index overlap matrix S3 (if pbs_str is 'same')
         if self.pbs_str == 'same':
-             # Contract the values to build the 3-index overlap matrix.
-             # The contraction 'ij, ik, il, i -> jkl' means:
-             # - For each grid point i, multiply the values for basis functions j, k, and l,
-             #   weight them by the integration weight at that grid point, and sum over i.
-             S3 = contract('ij, ik, il, i -> jkl', bs1, bs1, bs1, weights)
+          S3 = contract('ij, ik, il, i -> jkl', bs1, bs1, bs1, weights)
         else:
-             # If a different potential basis is used, evaluate that as well.
-             bs2 = self.pbs.eval_ao(coords)
-             S3 = contract('ij, ik, il, i -> jkl', bs1, bs1, bs2, weights)
- 
+          # If a different potential basis is used, evaluate that as well.
+          S3 = contract('ij, ik, il, i -> jkl', bs1, bs1, bs2, weights)
         return S3
        def get_S4(self):
         """
@@ -234,6 +249,52 @@ class VeloxchemEngine(Engine):
         jk.set_do_K(gen_K)
         jk.initialize()
         return jk
+       def _compute_coulomb_exchange(self, Cocc_a, Cocc_b, eri_tensor):
+        """
+        Compute the Coulomb and Exchange matrices from the ERI tensor and occupied orbital coefficients.
+        
+        Parameters
+        ----------
+        Cocc_a : array-like
+            Occupied orbital coefficients for alpha electrons.
+        Cocc_b : array-like
+            Occupied orbital coefficients for beta electrons.
+        eri_tensor : np.ndarray
+            The computed Electron Repulsion Integral (ERI) tensor.
+        
+        Returns
+        -------
+        J_alpha, J_beta : np.ndarray
+            The Coulomb matrices for alpha and beta spins.
+        """
+        # Number of basis functions
+        nbf = eri_tensor.shape[0]
+        
+        # Initialize the Coulomb (J) and Exchange (K) matrices
+        J_alpha = np.zeros((nbf, nbf))
+        J_beta = np.zeros((nbf, nbf))
+    
+        # Debugging the shapes of the arrays
+        print(f"Shape of Cocc_a: {Cocc_a.shape}")
+        print(f"Shape of Cocc_b: {Cocc_b.shape}")
+        print(f"Shape of eri_tensor: {eri_tensor.shape}")
+    
+        # Loop over the indices to compute the Coulomb and Exchange integrals
+        for i in range(nbf):
+            for j in range(nbf):
+                # Compute Coulomb term for alpha electrons
+                for k in range(nbf):
+                    for l in range(nbf):
+                        J_alpha[i, j] += eri_tensor[i, j, k, l] * Cocc_a[k, 0] * Cocc_a[l, 0]
+    
+                # Compute Coulomb term for beta electrons
+                for k in range(nbf):
+                    for l in range(nbf):
+                        J_beta[i, j] += eri_tensor[i, j, k, l] * Cocc_b[k, 0] * Cocc_b[l, 0]
+    
+        # Return the computed Coulomb matrices
+        return J_alpha, J_beta
+       '''
        def compute_hartree(self, Cocc_a=None, Cocc_b=None):
         """
         Generates Coulomb and Exchange matrices from occupied orbitals.
@@ -255,6 +316,8 @@ class VeloxchemEngine(Engine):
              scf_results = veloxchem.ScfRestrictedDriver().compute(self.mol, self.basis)
              Cocc_a = scf_results["C_alpha"]
              Cocc_b = scf_results["C_beta"]
+        if not hasattr(self, 'jk') or self.jk is None:
+           self.jk = CoulombExchangeOperator()  # Example initialization; replace with actual class
         # Add the occupied orbital contributions to the JK object.
         self.jk.C_left_add(Cocc_a)
         self.jk.C_left_add(Cocc_b)
@@ -268,6 +331,7 @@ class VeloxchemEngine(Engine):
         J_results = self.jk.J()
         J = (np.array(J_results[0]), np.array(J_results[1]))
         return J
+        '''
        def hartree_NO(self):
         """
         Computes the Hartree potential in the AO basis from Natural Orbitals.

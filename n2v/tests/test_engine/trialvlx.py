@@ -14,12 +14,15 @@ molecule = vlx.Molecule.read_xyz_string(molecule_data)
 
 # Now you can set the system
 basis = 'sto-3g'
+basis = vlx.MolecularBasis.read(molecule, basis, ostream=None)
 ref =1
-
-# Initialize the inverter for VeloxChem
+scf_drv = vlx.ScfRestrictedDriver()
+scf_drv.ostream.mute()
+scf_results = scf_drv.compute(molecule, basis)
+basis = 'sto-3g'
 inv = n2v.Inverter(engine='veloxchem')
-# Instead of passing a Molecule object, pass the geometry string directly
-inv.set_system(molecule_data, basis, ref=ref, pbs='same')
+# Now, pass scf_results to set_system
+inv.set_system(molecule_data, basis, ref=ref, pbs='same', scf_results=scf_results)
 
 # Now you can proceed with the inversion or other methods
 inv.invert("WuYang", opt_max_iter=100, opt_method="trust-exact", reg=0, gtol=1e-6, guide_components="fermi_amaldi")

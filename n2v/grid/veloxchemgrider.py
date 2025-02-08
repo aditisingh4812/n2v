@@ -24,6 +24,7 @@ except ImportError:
 
 if has_veloxchem:
     import veloxchem as vlx
+    from veloxchem import GridDriver
     import numpy as np
     from gbasis.evals.eval import evaluate_basis
     from gbasis.evals.electrostatic_potential import point_charge_integral
@@ -67,11 +68,18 @@ if has_veloxchem:
            self.Da = self.scf_results['D_alpha']
            if self.ref != 1:
             self.Db = self.scf_results['D_beta']
-           # Generate a uniform rectangular grid manually
-           x = np.linspace(0, 10, 10)  # Example grid with 10 points from 0 to 10
-           y = np.linspace(0, 10, 10)
-           z = np.linspace(0, 10, 10)
-           self.rectangular_grid, self.w = self.generate_grid(x,y,z)
+
+           grid_drv = GridDriver()
+           molgrid = grid_drv.generate(mol)  # Generate grid for the molecule
+           print(dir(molgrid))
+           # Step 2: Access grid points and weights
+           x_coords = molgrid.x_to_numpy()  # Get x coordinates as a NumPy array
+           y_coords = molgrid.y_to_numpy()  # Get y coordinates as a NumPy array
+           z_coords = molgrid.z_to_numpy()  # Get z coordinates as a NumPy array
+           coords = np.vstack((x_coords, y_coords, z_coords)).T  # Combine into a single array of coordinates
+           self.rectangular_grid = coords  # Get grid points as NumPy array
+           self.w = molgrid.w_to_numpy()  # Get weights for integration
+
         def generate_grid(self, grid_spacing=0.2):
             """
             Generates a simple rectangular grid.

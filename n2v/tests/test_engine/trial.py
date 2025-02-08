@@ -54,7 +54,7 @@ print("ea",ea)
 
 inv = n2v.Inverter.from_wfn(wfn, pbs=BASIS)
 print("here is the old one")
-pyscf_inv = n2v.Inverter(engine='veloxchem')
+pyscf_inv = n2v.Inverter(engine='psi4')
 print("success")
 epsilon = 5e-7
 delta_rho = epsilon * np.eye(da.shape[0])
@@ -62,7 +62,7 @@ drho =  np.einsum('ij,gi,gj->g', delta_rho, ca, ca)
 print("drho", drho)
 # Define the grid
 coords = np.array([(0., 0., x) for x in np.linspace(-5, 5, 43)])  # Custom grid points
-
+exit()
 
 da1 = da + delta_rho
 # Overwrite the Density matrix
