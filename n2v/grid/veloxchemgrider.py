@@ -29,50 +29,49 @@ if has_veloxchem:
     from gbasis.evals.electrostatic_potential import point_charge_integral
 
     class VeloxchemGrider:
-        """
-        Veloxchem Grider Class
-        Provides methods to obtain components on the grid using the package gbasis.
-        """
-        def __init__(self, mol, pbs_mol=None, basis_str=None, basis_file=None):
-            """
-            Initializes the Grider for VeloxChem with either a string or file-based basis set.
+        def __init__(self, mol, pbs_mol=None, basis_str=None, basis_file=None, ref=None):
+           self.mol = mol
+        # Handle user-defined basis set
+           if basis_str:
+             print(f"Basis being passed to MolecularBasis.read: {basis_str} (Type: {type(basis_str)})")
+             if not isinstance(basis_str, str):
+                raise ValueError(f"Expected basis_str to be a string, but got {type(basis_str)}")
+             self.basis = vlx.MolecularBasis.read(mol, basis_str)
+           elif basis_file:
+               self.basis = vlx.MolecularBasis.read_from_file(basis_file, mol)
+           else:
+               self.basis = vlx.MolecularBasis.read(mol, "def2-SVP")  # Default to def2-SVP if no input provided
+           self.pbs = vlx.MolecularBasis.read(pbs_mol, "def2-SVP") if pbs_mol else None
+           self.ref = ref
+           try:
+            self.atomic_charges = self.mol.get_charge()  # Replace with the correct method if necessary
+           except AttributeError:
+            print("Error: 'get_nuclear_charges' not found in the Molecule class.")
+           try:
+            # Assuming that you want to get the coordinates for all atoms
+            self.atomic_coords = [self.mol.get_atom_coordinates(i) for i in range(self.mol.number_of_atoms())]
+           except AttributeError:
+            print("Error: 'get_nuclear_coordinates' not found in the Molecule class.")
+           #self.atomic_charges = self.mol.nuclear_charges()
+           #self.atomic_coords = self.mol.nuclear_coordinates()
+           # Perform SCF Calculation based on ref
+           if self.ref == 1:
+             scf_drv = vlx.ScfRestrictedDriver()
+           else:
+             scf_drv = vlx.ScfUnrestrictedDriver()
+           # Perform a quick LDA calculation to generate density matrices.
+           self.scf_results = scf_drv.compute(mol, self.basis)
+           print(self.scf_results.keys())
 
-            Parameters
-            ----------
-            mol : veloxchem.Molecule
-                The molecule object representing the molecular system.
-            pbs_mol : veloxchem.Molecule, optional
-                The molecule object for the potential basis set (default is None).
-            basis_str : str, optional
-                A user-defined basis set string (default is None).
-            basis_file : str, optional
-                A file containing the basis set data (default is None).
-            """
-            self.mol = mol
-            
-            # Handle user-defined basis set
-            if basis_str:
-                self.basis = vlx.MolecularBasis.read_from_string(basis_str, mol)
-            elif basis_file:
-                self.basis = vlx.MolecularBasis.read_from_file(basis_file, mol)
-            else:
-                self.basis = vlx.MolecularBasis.read(mol, "def2-SVP")  # Default to def2-SVP if no input provided
-            
-            self.pbs = vlx.MolecularBasis.read(pbs_mol, "def2-SVP") if pbs_mol else None
-
-            self.atomic_charges = self.mol.nuclear_charges()
-            self.atomic_coords = self.mol.nuclear_coordinates()
-
-            # Perform a quick LDA calculation to generate density matrices.
-            scf_drv = vlx.ScfRestrictedDriver()
-            self.scf_results = scf_drv.compute(mol, self.basis)
-
-            # Extract density matrix from SCF results
-            self.Da = self.scf_results.density.alpha
-
-            # Generate a uniform rectangular grid manually
-            self.rectangular_grid, self.w = self.generate_grid()
-
+           # Extract density matrix from SCF results
+           self.Da = self.scf_results['D_alpha']
+           if self.ref != 1:
+            self.Db = self.scf_results['D_beta']
+           # Generate a uniform rectangular grid manually
+           x = np.linspace(0, 10, 10)  # Example grid with 10 points from 0 to 10
+           y = np.linspace(0, 10, 10)
+           z = np.linspace(0, 10, 10)
+           self.rectangular_grid, self.w = self.generate_grid(x,y,z)
         def generate_grid(self, grid_spacing=0.2):
             """
             Generates a simple rectangular grid.

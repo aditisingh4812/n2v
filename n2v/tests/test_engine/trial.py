@@ -54,7 +54,7 @@ print("ea",ea)
 
 inv = n2v.Inverter.from_wfn(wfn, pbs=BASIS)
 print("here is the old one")
-pyscf_inv = n2v.Inverter(engine='psi4')
+pyscf_inv = n2v.Inverter(engine='veloxchem')
 print("success")
 epsilon = 5e-7
 delta_rho = epsilon * np.eye(da.shape[0])

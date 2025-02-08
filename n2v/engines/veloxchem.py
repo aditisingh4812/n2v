@@ -16,10 +16,15 @@ except ImportError:
 if has_veloxchem:
     from ..grid import VeloxchemGrider
 class VeloxchemEngine(Engine):
+       def __init__(self, engine='veloxchem', ref=1):
+        self.engine = engine
+        self.ref = ref  # Initialize the reference type (1 for restricted, 2 for unrestricted)
+        # Other initializations
        """
        Veloxchem Engine Class
        """
        def set_system(self, xyz_string, basis, ref=1, pbs='same'):
+        print(f"Basis being used: {basis}, Type: {type(basis)}")
         """
         Initializes geometry and basis information.
         Parameters
@@ -35,47 +40,60 @@ class VeloxchemEngine(Engine):
         """
         # Define the molecule
         self.mol = veloxchem.Molecule.read_xyz_string(xyz_string)
+        print(f"Basis type before MolecularBasis.read: {type(basis)}")
         # Assign basis sets
         self.basis = veloxchem.MolecularBasis.read(self.mol, basis)
+
         self.pbs = veloxchem.MolecularBasis.read(self.mol, basis if pbs == 'same' else pbs)
         # Store reference type
         self.basis_str = basis
+
         self.pbs_str = basis if pbs == 'same' else pbs
+        # Print the basis and pbs information for debugging
+        print(f"Basis string: {self.basis_str}, Type: {type(self.basis_str)}")
+        print(f"PBS string: {self.pbs_str}, Type: {type(self.pbs_str)}")
+        #print(f"Basis being passed to MolecularBasis.read: {basis_str} (Type: {type(basis_str)})")
+
         # Get number of alpha and beta electrons
-        self.nalpha, self.nbeta = self.mol.nelec()
+        self.nalpha = self.mol.number_of_alpha_electrons()
          # Get number of alpha and beta electrons
-        self.nalpha, self.nbeta = self.mol.nelec()
+        self.nbeta = self.mol.number_of_beta_electrons()
         # Perform SCF Calculation
         if self.ref == 1:
             self.scf_drv = veloxchem.ScfRestrictedDriver()
         else:
             self.scf_drv = veloxchem.ScfUnrestrictedDriver()  # Use unrestricted driver if ref=2
         self.scf_results = self.scf_drv.compute(self.mol, self.basis)
+        print("this is done")
        def initialize(self):
         """
         Initializes basic objects required for the VeloxchemEngine.
         """
         # Initialize the basis sets using the VeloxChem interface.
         self.basis = veloxchem.MolecularBasis.read(self.mol, self.basis_str, ostream=None)
+        print(f"PBS string: {self.basis_str}, Type: {type(self.basis)}")
         self.pbs   = veloxchem.MolecularBasis.read(self.mol, self.pbs_str, ostream=None)
         # Retrieve dimensions for each basis set.
-        self.nbf   = self.basis.get_dimension_of_basis()
-        self.npbs  = self.pbs.get_dimension_of_basis()
+        print(f"PBS string: {self.pbs_str}, Type: {type(self.pbs)}")
+        self.nbf   = self.basis.get_dimension_of_basis(self.mol)
+        self.npbs  = self.pbs.get_dimension_of_basis(self.mol)
         # Initialize the grid using the VeloxchemGrider.
-        self.grid = VeloxchemGrider(self.mol, self.basis, self.ref)
+        #self.grid = VeloxchemGrider(self.mol, self.basis, self.ref)
+        self.grid = VeloxchemGrider(self.mol, basis_str=self.basis_str, ref= self.ref)
+
        def get_T(self):
         """Kinetic Potential in ao basis"""
-        return self.mol.KineticEnergyIntegralsDriver().compute(self.mol, self.basis).to_numpy()
+        return veloxchem.KineticEnergyIntegralsDriver().compute(self.mol, self.basis).to_numpy()
        def get_Tpbas(self):
         """Kinetic Potential in pbs"""
-        return self.mol.KineticEnergyIntegralsDriver().compute(self.mol, self.pbs).to_numpy()
+        return veloxchem.KineticEnergyIntegralsDriver().compute(self.mol, self.pbs).to_numpy()
        def get_V(self):
         """External potential in ao basis"""
-        return self.mol.NuclearPotentialIntegralsDriver().compute(self.mol,self.basis).to_numpy()
+        return veloxchem.NuclearPotentialIntegralsDriver().compute(self.mol,self.basis).to_numpy()
        def get_A(self):
         """Inverse squared root of S matrix computed via eigenvalue decomposition."""
         # Compute the overlap matrix S in the atomic orbital basis.
-        S = self.mol.OverlapIntegralsDriver().compute(self.mol, self.basis).to_numpy()
+        S = veloxchem.OverlapIntegralsDriver().compute(self.mol, self.basis).to_numpy()
         # Diagonalize S.
         eigvals, eigvecs = np.linalg.eigh(S)
         # Define a threshold to avoid division by zero.
@@ -83,10 +101,13 @@ class VeloxchemEngine(Engine):
         eigvals_inv_sqrt = np.array([1/np.sqrt(val) if val > threshold else 0 for val in eigvals])
         # Reconstruct the inverse square root matrix.
         A = eigvecs @ np.diag(eigvals_inv_sqrt) @ eigvecs.T
+        print("this is done")
         return A
        def get_S(self):
+        print("problem starts")
+
         """Overlap matrix in AO basis"""
-        return self.mol.OverlapIntegralsDriver().compute(self.mol,self.basis).to_numpy()
+        return veloxchem.OverlapIntegralsDriver().compute(self.mol,self.basis).to_numpy()
        def get_S3(self):
         """
         Builds the 3-index overlap matrix.
@@ -97,6 +118,9 @@ class VeloxchemEngine(Engine):
         Shape: (nbf, nbf, nbf) if using the same basis for all integrals,
                 or (nbf, nbf, npbs) if a separate potential basis is used.
         """
+        print(f"Type of self.basis: {type(self.basis)}")
+        print(f"Does self.basis have eval_ao method? {hasattr(self.basis, 'eval_ao')}")
+
         # Use the grid provided by your VeloxchemGrider (assumed to be already built)
         coords   = self.grid.coords    # array of grid points
         weights  = self.grid.weights   # corresponding integration weights
