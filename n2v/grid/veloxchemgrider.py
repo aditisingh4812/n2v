@@ -77,7 +77,7 @@ if has_veloxchem:
            y_coords = molgrid.y_to_numpy()  # Get y coordinates as a NumPy array
            z_coords = molgrid.z_to_numpy()  # Get z coordinates as a NumPy array
            coords = np.vstack((x_coords, y_coords, z_coords)).T  # Combine into a single array of coordinates
-           self.rectangular_grid = coords  # Get grid points as NumPy array
+           self.spherical_points = coords  # Get grid points as NumPy array
            self.w = molgrid.w_to_numpy()  # Get weights for integration
 
         def generate_grid(self, grid_spacing=0.2):
@@ -95,7 +95,31 @@ if has_veloxchem:
             weights = np.full(len(grid_points), grid_spacing**3)
 
             return grid_points, weights
-
+        def assert_grid(self, grid_type):
+            """
+            Asserts the type of grid (spherical or rectangular) and returns the corresponding points.
+            """
+            if isinstance(grid_type, np.ndarray) or isinstance(grid_type, list):
+                if 'spherical' in grid_type:
+                    points = self.spherical_points
+                elif 'rectangular' in grid_type:
+                    if self.rectangular_grid is None:
+                        raise ValueError("Rectangular grid must be defined first. Please generate the grid before accessing it.")
+                    points = self.rectangular_grid
+                else:
+                    raise ValueError("Invalid grid type specified. Use either 'spherical' or 'rectangular'.")
+            else:
+                # Proceed with the normal string comparison if it's a single string
+                if grid_type == 'spherical':
+                    points = self.spherical_points
+                elif grid_type == 'rectangular':
+                    if self.rectangular_grid is None:
+                        raise ValueError("Rectangular grid must be defined first. Please generate the grid before accessing it.")
+                    points = self.rectangular_grid
+                else:
+                    raise ValueError("Invalid grid type specified. Use either 'spherical' or 'rectangular'.")
+            return points
+        '''
         def assert_grid(self, grid_type):
             """
             Asserts the type of grid (spherical or rectangular) and returns the corresponding points.
@@ -123,6 +147,7 @@ if has_veloxchem:
             else:
               raise ValueError("Invalid grid type specified. Use either 'spherical' or 'rectangular'.")
             return points
+        '''    
         def generate_grid(self, x, y, z):
             """
             Generates a cubic mesh grid from 3 separate linear spaces (x, y, z),

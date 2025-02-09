@@ -17,43 +17,56 @@ basis = 'sto-3g'
 basis = vlx.MolecularBasis.read(molecule, basis, ostream=None)
 ref =1
 scf_drv = vlx.ScfRestrictedDriver()
-scf_drv.ostream.mute()
-scf_results = scf_drv.compute(molecule, basis)
+#scf_drv.ostream.mute()
+#print(dir(scf_drv))
+scf_result = scf_drv.compute(molecule, basis)
+
 basis = 'sto-3g'
 inv = n2v.Inverter(engine='veloxchem')
+# **Call from_scf() to initialize densities and orbitals properly**
+inv.from_scf(scf_result,molecule_data,basis)
+
+# Now, you can proceed with inversion
+inv.invert("wuyang", opt_max_iter=100, opt_method="trust-exact", reg=0, gtol=1e-6, guide_components="fermi_amaldi")
+#inv.invert("zmp", opt_max_iter=100, opt_tol=1e-7, zmp_mixing=1, lambda_list=np.linspace(10, 1000, 20), guide_components="fermi_amaldi")
+#x = np.linspace(-5, 10, 1501)
+#y = [0]
+#z = [0]
+#grid, shape = inv.eng.grid.generate_grid(x, y, z)
+#inv.invert('mRKS', vxc_grid=grid, opt_max_iter=30, frac_old=0.8, init='scan')
+
+#inv.from_scf(scf_result)
 # Now, pass scf_results to set_system
-inv.set_system(molecule_data, basis, ref=ref, pbs='same', scf_results=scf_results)
+inv.set_system(molecule_data, basis, ref=ref, pbs='same')
 
-# Now you can proceed with the inversion or other methods
-inv.invert("WuYang", opt_max_iter=100, opt_method="trust-exact", reg=0, gtol=1e-6, guide_components="fermi_amaldi")
 
-exit()
-# Mock some example data for testing (replace these with real calculation data)
-# In a real calculation, this would be extracted from the results of the SCF procedure.
-da = np.random.rand(5, 5)  # Mock density matrix
-ca = np.random.rand(5, 5)  # Mock coefficient matrix
-ea = np.random.rand(5)     # Mock eigenvalues (orbital energies)
+grid_drv = vlx.GridDriver()
+molgrid = grid_drv.generate(molecule)  # Generate grid for the molecule
+print(dir(molgrid))
+# Step 2: Access grid points and weights
+x_coords = molgrid.x_to_numpy()  # Get x coordinates as a NumPy array
+y_coords = molgrid.y_to_numpy()  # Get y coordinates as a NumPy array
+z_coords = molgrid.z_to_numpy()  # Get z coordinates as a NumPy array
+
+# Combine the coordinates into a single array of points (spherical grid)
+spherical_points = np.vstack((x_coords, y_coords, z_coords)).T  # Shape: (num_points, 3)
+# Access the weights for integration
+w = molgrid.w_to_numpy()  # Weights associated with the grid points
+
 
 # Set the inverter data
-inv.Dt = [da, da]  # Mock density matrices (should be split for alpha/beta)
-inv.ct = [ca, ca]  # Mock coefficients
-inv.et = [ea, ea]  # Mock eigenvalues
+inv.Dt = [scf_result['D_alpha'], scf_result['D_beta']]  # Density matrices for alpha and beta
+inv.ct = [scf_result['C_alpha'], scf_result['C_beta']]  # Coefficients for alpha and beta
+inv.et = [scf_result['E_alpha'], scf_result['E_beta']]  # Eigenvalues for alpha and beta
 
-# Perform the inversion
-inv.invert("WuYang", opt_max_iter=100, opt_method="trust-exact", reg=0, gtol=1e-6, guide_components="fermi_amaldi")
+exit()
+# Step 4: Compute the Hartree potential using the spherical grid
+vH1 = inv.eng.grid.hartree(inv.Dt,molgrid)
 
-# Build the grid for potential calculations
-x = np.linspace(-5, 5, 43)
-y = np.zeros_like(x)
-z = np.zeros_like(x)
-grid = np.array([x, y, z])
-
-# Generate the grid for the calculation
-grid2 = inv.eng.grid.generate_grid(x=x, y=[0], z=[0])[0]
-
-# Compute the Hartree potential and Fermi-Amaldi potential
-vH1 = inv.eng.grid.esp(Da=inv.Dt[0], Db=inv.Dt[1], grid=grid)[1]
+exit()
+# Step 5: Compute the Fermi-Amaldi potential using the Hartree potential
 vFA1 = (1 - 1 / (inv.nalpha + inv.nbeta)) * vH1
+
 
 # Compute the rest potential
 vrest1 = inv.eng.grid.ao(inv.v_pbs, grid=grid, basis=inv.eng.pbs)
@@ -66,6 +79,7 @@ np.save("dm.npy", da)
 np.save("coeff.npy", ca)
 np.save("eigen.npy", ea)
 
+exit()
 # Write the results to a file
 with open('file.txt', 'w') as f:
     s = 0

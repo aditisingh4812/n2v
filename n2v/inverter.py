@@ -5,7 +5,7 @@ from warnings import warn
 from dataclasses import dataclass
 import numpy as np
 from opt_einsum import contract
-import veloxchem
+
 from .methods.zmp import ZMP
 from .methods.wuyang import WuYang
 from .methods.pdeco import PDECO
@@ -92,83 +92,11 @@ class Inverter(Direct, ZMP, WuYang, PDECO, OC, MRKS):
             from .engines import VeloxchemEngine
             self.eng = VeloxchemEngine()
         else:
-            raise ValueError("Engine name is incorrect. The availiable engines are: {psi4, pyscf,veloxchem}")
+            raise ValueError("Engine name is incorrect. The availiable engines are: {psi4, pyscf}")
             
     def __repr__( self ):
         return "n2v.Inverter"
 
-
-    def set_system(self, molecule, basis, ref=1, pbs='same',scf_results=None, **kwargs):
-        """
-        Stores relevant information and initializes Engine
-    
-        Parameters
-        ----------
-        molecule: Engine.molecule
-            Molecule object of the selected engine
-        basis: str
-            Basis set of the main calculation
-        ref: int
-            Reference for system. Restricted   -> 1
-                                          Unrestricted -> 2
-        pbs: str, default='same'
-            Basis set for the potential
-        **kwargs:
-            Optional Parameters for different Engines
-            Psi4 Engine:
-                wfn : psi4.core.{RHF, UHF, RKS, UKS, Wavefunction, CCWavefunction...}
-                    Psi4 wavefunction object
-            VeloxChem Engine:
-                None
-        """
-    
-        # Set up the system for the respective engine
-        self.eng.set_system(molecule, basis, ref, pbs, **kwargs)
-        self.ref = ref
-    
-        # Extract alpha and beta electrons
-        self.nalpha = self.eng.nalpha
-        self.nbeta = self.eng.nbeta
-    
-        # Initialize engine (e.g., build basis matrices)
-        self.eng.initialize()
-        self.set_basis_matrices()
-    
-        # Receive system info from engine
-        self.nbf = self.eng.nbf  # Number of basis functions
-        self.npbs = self.eng.npbs  # Number of pseudo-basis functions (if applicable)
-    
-        # Initialize potential basis set
-        self.v_pbs = np.zeros(self.npbs) if self.ref == 1 else np.zeros(2 * self.npbs)
-        # Handle ct (occupied orbitals) initialization depending on the engine
-        if self.eng_str == 'veloxchem':
-           if scf_results is None:
-             raise ValueError("SCF results must be provided for VeloxChem engine.")
-           # Get molecular orbital coefficients (C), which are returned as a NumPy array
-           C = scf_results["C"]
-           # Extract alpha and beta occupied orbitals (first, num_alpha_orbitals columns of C)
-           alpha_occupied_orbitals = C[:, :self.nalpha]
-           beta_occupied_orbitals = C[:, self.nalpha:]
-           # Store them in ct
-           self.ct = [alpha_occupied_orbitals, beta_occupied_orbitals] 
-        elif self.eng_str == 'psi4' and 'wfn' in kwargs:
-            # For Psi4, initialize ct based on the provided wavefunction (wfn)
-            wfn = kwargs['wfn']
-            self.ct = [
-                np.array(wfn.Ca_subset("AO", "OCC")),  # Alpha occupied orbitals
-                np.array(wfn.Cb_subset("AO", "OCC"))   # Beta occupied orbitals
-            ]
-        else:
-            raise ValueError("Unsupported engine or missing wavefunction for Psi4.")
-    
-        # Optionally, you can also initialize other parameters (like Dt) if needed for your use case
-        # Example for Psi4:
-        if self.eng_str == 'psi4':
-            self.Dt = [np.array(wfn.Da()), np.array(wfn.Db())]
-    
-        # Ensure that the system is properly set up
-        print(f"System set up for engine {self.eng_str} with {self.nalpha} alpha and {self.nbeta} beta electrons.")
-    '''
     def set_system( self, molecule, basis, ref=1, pbs='same' , **kwargs):
         """
         Stores relevant information and intitializes Engine
@@ -191,6 +119,12 @@ class Inverter(Direct, ZMP, WuYang, PDECO, OC, MRKS):
                 Psi4 wavefunction object
             PySCF Engine:
                 None
+            Veloxchem Engine:
+                scf_result : vlx.ScfRestrictedDriver().compute(mol, self.basis)[]
+                contains keys:dict_keys(['eri_thresh', 'qq_type', 'scf_type', 'scf_energy', 'restart', 'S', 'C_alpha', 'C_beta', 'E_alpha', 
+                'E_beta', 'occ_alpha', 'occ_beta', 'D_alpha', 'D_beta', 'F_alpha', 'F_beta', 'C', 'E', 'D', 'F', 'dipole_moment'])
+
+
 
         """
         # Communicate TO engine
@@ -210,49 +144,6 @@ class Inverter(Direct, ZMP, WuYang, PDECO, OC, MRKS):
         self.npbs = self.eng.npbs
         self.v_pbs = np.zeros( (self.npbs) ) if self.ref == 1 \
                                              else np.zeros( 2 * self.npbs )
-
-    '''
-
-    def from_veloxchem(cls, mol, basis, ref=1, pbs='same'):
-        """
-        Generates Inverter directly from VeloxChem results.
-
-        Parameters
-        ----------
-        mol : Molecule
-            The molecule object.
-        basis : BasisSet
-            The basis set used for the calculation.
-        ref : int, optional
-            The reference calculation type. 1 for restricted, 2 for unrestricted.
-        pbs : str, optional
-            The potential basis set (e.g., 'same').
-
-        Returns
-        -------
-        inv : n2v.Inverter
-            The initialized Inverter object.
-        """
-        from .engines import VeloxChemEngine  # Assuming you have this engine set up
-
-        inv = cls(engine='veloxchem')  # Initialize Inverter object
-        inv.eng = VeloxChemEngine()    # Initialize VeloxChem engine
-
-        # Set up the system in the Inverter object
-        inv.set_system(mol, basis, ref=ref, pbs=pbs)
-
-        # Get the density matrices, occupied orbitals, and energy levels from VeloxChem
-        inv.Dt = [np.array(inv.eng.get_density_matrix('alpha')), np.array(inv.eng.get_density_matrix('beta'))]
-
-        # Assuming you have a method to get occupied orbitals from VeloxChem
-        inv.ct = [np.array(inv.eng.get_occupied_orbitals('alpha')), np.array(inv.eng.get_occupied_orbitals('beta'))]
-
-        # Get the eigenvalues (if available)
-        inv.et = [np.array(inv.eng.get_eigenvalues('alpha')), np.array(inv.eng.get_eigenvalues('beta'))]
-
-        inv.eng_str = 'veloxchem'  # Set engine string to VeloxChem
-        return inv
-
 
     @classmethod
     def from_wfn( self, wfn, pbs='same' ):
@@ -280,6 +171,59 @@ class Inverter(Direct, ZMP, WuYang, PDECO, OC, MRKS):
         inv.eng.wfn = wfn
 
         return inv
+    def from_scf(self, scf_result,molecule, basis, pbs='same'):
+        """
+        Generates Inverter directly from scf_drv.
+    
+        Parameters
+        ----------
+        scf_result : vlx.ScfRestrictedDriver().compute(mol, self.basis) or
+                     vlx.ScfUnrestrictedDriver().compute(mol, self.basis)
+    
+        Returns
+        -------
+        inv: n2v.Inverter
+            Inverter Object.
+        """
+        from .engines import VeloxchemEngine
+        self.eng = VeloxchemEngine() 
+        #inv = self(engine='veloxchem')
+        #inv.eng = VeloxchemEngine()
+    
+        # Determine if the calculation is restricted (RHF) or unrestricted (UHF)
+        if 'D_beta' in scf_result:  # If 'D_beta' exists, it's unrestricted (UHF)
+            ref = 2
+        else:
+            ref = 1  # Otherwise, it's restricted (RHF)
+    
+        self.set_system(
+            molecule,
+            basis,
+            pbs=pbs,
+            ref=ref)
+    
+        # Assign density matrices
+        if ref ==1:
+            self.Dt =[scf_result['D']]
+        else :
+            self.Dt =[scf_result['D_alpha'], scf_result['D_beta']]  # Include beta density for UHF
+    
+        # Assign molecular orbitals
+        if ref == 1:  # RHF case: Use 'C'
+            self.ct = [scf_result['C']]
+        else:  # UHF case: Use 'C_alpha' and 'C_beta'
+            self.ct = [scf_result['C_alpha'], scf_result['C_beta']]
+    
+        # Assign orbital energies
+        if ref == 1:  # RHF case: Use 'E'
+            self.et = [scf_result['E']]
+        else:  # UHF case: Use 'E_alpha' and 'E_beta'
+            self.et = [scf_result['E_alpha'], scf_result['E_beta']]
+    
+        self.eng_str = 'veloxchem'
+        self.eng.scf_result = scf_result  # Fixed typo ('ing' → 'inv')
+    
+        return self
 
     def set_basis_matrices( self ):
         """
@@ -289,7 +233,7 @@ class Inverter(Direct, ZMP, WuYang, PDECO, OC, MRKS):
         self.V  = self.eng.get_V()
         self.A  = self.eng.get_A()
         self.S2 = self.eng.get_S()
-        self.S3      = self.eng.get_S3()
+        self.S3 = self.eng.get_S3()
 
         if self.eng.pbs_str != 'same':  
             self.T_pbs  = self.eng.get_Tpbas()
@@ -374,68 +318,39 @@ class Inverter(Direct, ZMP, WuYang, PDECO, OC, MRKS):
         else:
             self.Cb, self.Cocb, self.Db, self.eigvecs_b = self.diagonalize( fock_b, self.nbeta )    
 
+    # Actual Methods
     def generate_components(self, guide_components, **keywords):
         """
         Generates exact potential components to be added to
-        the Hamiltonian to aid in the inversion procedure.
-
-        Parameters
+        the Hamiltonian to aide in the inversion procedure. 
+        Parameters:
         -----------
         guide_potential_components: list
-            Components added to guide inversion.
-            Can be chosen from ["hartree", "fermi_amaldi", "none"]
+            Components added as to guide inversion. 
+            Can be chosen from ["hartree", "fermi_amandi", "svwn"]
         """
+
         self.guide_components = guide_components
-        self.va = np.zeros((self.nbf, self.nbf))
-        self.vb = np.zeros((self.nbf, self.nbf))
-
-        # Compute Hartree Potential (J0) based on occupied orbitals
+        self.va = np.zeros( (self.nbf, self.nbf) )
+        self.vb = np.zeros( (self.nbf, self.nbf) )
         self.J0 = self.compute_hartree(self.ct[0], self.ct[1])
+        N       = self.nalpha + self.nbeta
 
-        # Number of electrons
-        N = self.nalpha + self.nbeta
-
-        # If engine is Psi4, use Psi4-specific methods
         if self.eng_str == 'psi4':
-            # Ensure the Hartree potential is computed using Psi4 methods
-            J0_NO = self.eng.hartree_NO(self.Dt[0])  # Assuming this is a method for Psi4
+            J0_NO = self.eng.hartree_NO(self.Dt[0])
             self.J0 = J0_NO if J0_NO is not None else self.J0
 
-            # Handle guide components for Psi4
-            if guide_components == 'none':
-                warn("No guide potential was provided. Convergence may not be achieved")
-            elif guide_components == 'hartree':
-                self.va += self.J0[0] + self.J0[1]
-                self.vb += self.J0[0] + self.J0[1]
-            elif guide_components == 'fermi_amaldi':
-                v_fa = (1 - 1 / N) * (self.J0[0] + self.J0[1])
-                self.va += v_fa
-                self.vb += v_fa
-            else:
-                raise ValueError("Guide component not recognized")
-
-        # If engine is VeloxChem, use VeloxChem-specific methods
-        elif self.eng_str == 'veloxchem':
-            # Ensure the Hartree potential is computed using VeloxChem methods
-            J0_NO = self.eng.hartree_NO(self.Dt[0])  # Assuming this is a method for VeloxChem
-            self.J0 = J0_NO if J0_NO is not None else self.J0
-
-            # Handle guide components for VeloxChem
-            if guide_components == 'none':
-                warn("No guide potential was provided. Convergence may not be achieved")
-            elif guide_components == 'hartree':
-                self.va += self.J0[0] + self.J0[1]
-                self.vb += self.J0[0] + self.J0[1]
-            elif guide_components == 'fermi_amaldi':
-                v_fa = (1 - 1 / N) * (self.J0[0] + self.J0[1])
-                self.va += v_fa
-                self.vb += v_fa
-            else:
-                raise ValueError("Guide component not recognized")
-
+        if guide_components == 'none':
+            warn("No guide potential was provided. Convergence may not be achieved")
+        elif guide_components == 'hartree':
+            self.va += self.J0[0] + self.J0[1]
+            self.vb += self.J0[0] + self.J0[1]
+        elif guide_components == 'fermi_amaldi':
+            v_fa = (1-1/N) * (self.J0[0] + self.J0[1])
+            self.va += v_fa
+            self.vb += v_fa
         else:
-            raise ValueError(f"Unknown engine: {self.eng_str}")
-
+            raise ValueError("Guide component not recognized")
 
     def invert(self, method, 
                      guide_components = 'hartree',

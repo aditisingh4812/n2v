@@ -17,13 +17,8 @@ if has_veloxchem:
     from ..grid import VeloxchemGrider
     from veloxchem import GridDriver, XCIntegrator
 class VeloxchemEngine(Engine):
-       def __init__(self, engine='veloxchem', ref=1):
-        self.engine = engine
-        self.ref = ref  # Initialize the reference type (1 for restricted, 2 for unrestricted)
-        # Other initializations
-        """
-        Veloxchem Engine Class
-        """
+       def __init__(self):
+        pass
        def set_system(self, xyz_string, basis, ref=1, pbs='same',scf_results=None):
         print(f"Basis being used: {basis}, Type: {type(basis)}")
         """
@@ -46,21 +41,19 @@ class VeloxchemEngine(Engine):
         print(f"Basis type before MolecularBasis.read: {type(basis)}")
         # Assign basis sets
         self.basis = veloxchem.MolecularBasis.read(self.mol, basis)
-
         self.pbs = veloxchem.MolecularBasis.read(self.mol, basis if pbs == 'same' else pbs)
         # Store reference type
         self.basis_str = basis
-
         self.pbs_str = basis if pbs == 'same' else pbs
         # Print the basis and pbs information for debugging
         print(f"Basis string: {self.basis_str}, Type: {type(self.basis_str)}")
         print(f"PBS string: {self.pbs_str}, Type: {type(self.pbs_str)}")
         #print(f"Basis being passed to MolecularBasis.read: {basis_str} (Type: {type(basis_str)})")
-
         # Get number of alpha and beta electrons
         self.nalpha = self.mol.number_of_alpha_electrons()
          # Get number of alpha and beta electrons
         self.nbeta = self.mol.number_of_beta_electrons()
+        self.ref = ref
         # Perform SCF Calculation
         if self.ref == 1:
             self.scf_drv = veloxchem.ScfRestrictedDriver()
@@ -72,32 +65,49 @@ class VeloxchemEngine(Engine):
         else:
           print("Using provided SCF results.")
           self.scf_results = scf_results
-        print("this is done")
+        # Compute integrals after SCF calculation
+        self.g = veloxchem.ElectronRepulsionIntegralsDriver().compute_in_memory(self.mol, self.basis)
        def initialize(self):
         """
         Initializes basic objects required for the VeloxchemEngine.
         """
-        # Initialize the basis sets using the VeloxChem interface.
-        self.basis = veloxchem.MolecularBasis.read(self.mol, self.basis_str, ostream=None)
-        print(f"PBS string: {self.basis_str}, Type: {type(self.basis)}")
-        self.pbs   = veloxchem.MolecularBasis.read(self.mol, self.pbs_str, ostream=None)
         # Retrieve dimensions for each basis set.
         print(f"PBS string: {self.pbs_str}, Type: {type(self.pbs)}")
         self.nbf   = self.basis.get_dimension_of_basis(self.mol)
         self.npbs  = self.pbs.get_dimension_of_basis(self.mol)
-        # Initialize the grid using the VeloxchemGrider.
-        #self.grid = VeloxchemGrider(self.mol, self.basis, self.ref)
         self.grid = VeloxchemGrider(self.mol, basis_str=self.basis_str, ref= self.ref)
-
+        print("done")
        def get_T(self):
-        """Kinetic Potential in ao basis"""
+        """
+        Generates Kinetic Operator in AO basis.
+
+        Returns
+        -------
+        T: np.ndarray. Shape: (nbf, nbf)
+        """
+        print("done-t")
         return veloxchem.KineticEnergyIntegralsDriver().compute(self.mol, self.basis).to_numpy()
        def get_Tpbas(self):
-        """Kinetic Potential in pbs"""
+        """
+        Generates Kinetic Operator in AO basis for additional basis.
+
+        Returns
+        -------
+        T_pbas: np.ndarray. Shape: (nbf, nbf)
+        """
+        print("done-tbas")
         return veloxchem.KineticEnergyIntegralsDriver().compute(self.mol, self.pbs).to_numpy()
        def get_V(self):
-        """External potential in ao basis"""
-        return veloxchem.NuclearPotentialIntegralsDriver().compute(self.mol,self.basis).to_numpy()
+        """
+        Generates External Potential in AO basis
+
+        Returns
+        -------
+        V: np.ndarray. Shape: (nbf, nbf)
+        """
+        print("done-v")
+        return -veloxchem.NuclearPotentialIntegralsDriver().compute(self.mol, self.basis).to_numpy()
+
        def get_A(self):
         """Inverse squared root of S matrix computed via eigenvalue decomposition."""
         # Compute the overlap matrix S in the atomic orbital basis.
@@ -109,10 +119,10 @@ class VeloxchemEngine(Engine):
         eigvals_inv_sqrt = np.array([1/np.sqrt(val) if val > threshold else 0 for val in eigvals])
         # Reconstruct the inverse square root matrix.
         A = eigvecs @ np.diag(eigvals_inv_sqrt) @ eigvecs.T
-        print("this is done")
+        print("done-a")
         return A
        def get_S(self):
-        print("problem starts")
+        print("done-s")
 
         """Overlap matrix in AO basis"""
         return veloxchem.OverlapIntegralsDriver().compute(self.mol,self.basis).to_numpy()
@@ -126,7 +136,6 @@ class VeloxchemEngine(Engine):
         Shape: (nbf, nbf, nbf) if using the same basis for all integrals,
                 or (nbf, nbf, npbs) if a separate potential basis is used.
         """
-
         # Step 1: Generate the grid using VeloxChem
         grid_drv = GridDriver()
         grid_drv.set_level(grid_level)  # Adjust the grid density level (1-8, default is 4)
@@ -153,6 +162,7 @@ class VeloxchemEngine(Engine):
         else:
           # If a different potential basis is used, evaluate that as well.
           S3 = contract('ij, ik, il, i -> jkl', bs1, bs1, bs2, weights)
+        print("done-s3")
         return S3
        def get_S4(self):
         """
@@ -187,204 +197,29 @@ class VeloxchemEngine(Engine):
         S_PQinv = np.linalg.pinv(S_PQ, rcond=1e-9)
         # Contract the intermediates to form the 4-index overlap matrix.
         S4 = contract('Pmn,PQ,Qrs->mnrs', S_Pmn, S_PQinv, S_Pmn)
+        print("done-s4")
         return S4
-       def generate_jk(self, gen_K=False):
-        """
-        Creates a JK-like object for the generation of Coulomb and Exchange matrices.
-        In Psi4, this is done via psi4.core.JK.build. VeloxChem does not yet provide an
-        equivalent interface, so we define a dummy class that you can later modify to
-        perform the actual Coulomb and Exchange matrix evaluations.
-        Parameters
-        ----------
-        gen_K : bool, optional
-        Whether to generate the Exchange (K) matrix as well (default is False).
-        Returns
-        -------
-        jk : object
-        An object with methods to compute the Coulomb (and optionally, Exchange) matrices.
-        """
-        # Define a dummy JK-like class for VeloxChem.
-        class VeloxchemJK:
-            def __init__(self, basis):
-             self.basis = basis
-             self.do_K = False
-             self.memory = 0  # memory in bytes, for example
-            def memory_estimate(self):
-             # Provide a crude memory estimate based on the basis size.
-             # (This is a placeholder calculation; adjust as needed.)
-             nbf = self.basis.get_dimension_of_basis()
-             return nbf**2 * 8  # for instance, 8 bytes per float element
-            def set_memory(self, mem):
-             self.memory = mem
-            def set_do_K(self, do_K):
-             self.do_K = do_K
-            def  initialize(self):
-              # Perform any necessary initializations.
-              # For example, precompute integral intermediates if available.
-              pass
-            def compute(self, density):
-              """
-              Compute the Coulomb (J) matrix, and if requested, the Exchange (K) matrix.
-              Parameters
-              ----------
-              density : np.ndarray
-                 The density matrix.
-              Returns
-              -------
-              J : np.ndarray
-                Coulomb matrix.
-              K : np.ndarray (if self.do_K is True)
-                Exchange matrix.
-              Note: This method is a placeholder. You need to implement the actual
-                  algorithms for evaluating the Coulomb and Exchange matrices.
-              """
-              # Placeholder implementation:
-              # Here you should implement the integral evaluations and contractions
-              # needed to obtain the Coulomb and Exchange matrices.
-              raise NotImplementedError("JK computation has not been implemented for VeloxChem.")
-              # Instantiate and set up the JK object.
-        jk = VeloxchemJK(self.basis)
-        memory = int(jk.memory_estimate() * 1.1)
-        jk.set_memory(memory)
-        jk.set_do_K(gen_K)
-        jk.initialize()
-        return jk
-       def _compute_coulomb_exchange(self, Cocc_a, Cocc_b, eri_tensor):
-        """
-        Compute the Coulomb and Exchange matrices from the ERI tensor and occupied orbital coefficients.
-        
-        Parameters
-        ----------
-        Cocc_a : array-like
-            Occupied orbital coefficients for alpha electrons.
-        Cocc_b : array-like
-            Occupied orbital coefficients for beta electrons.
-        eri_tensor : np.ndarray
-            The computed Electron Repulsion Integral (ERI) tensor.
-        
-        Returns
-        -------
-        J_alpha, J_beta : np.ndarray
-            The Coulomb matrices for alpha and beta spins.
-        """
-        # Number of basis functions
-        nbf = eri_tensor.shape[0]
-        
-        # Initialize the Coulomb (J) and Exchange (K) matrices
-        J_alpha = np.zeros((nbf, nbf))
-        J_beta = np.zeros((nbf, nbf))
-    
-        # Debugging the shapes of the arrays
-        print(f"Shape of Cocc_a: {Cocc_a.shape}")
-        print(f"Shape of Cocc_b: {Cocc_b.shape}")
-        print(f"Shape of eri_tensor: {eri_tensor.shape}")
-    
-        # Loop over the indices to compute the Coulomb and Exchange integrals
-        for i in range(nbf):
-            for j in range(nbf):
-                # Compute Coulomb term for alpha electrons
-                for k in range(nbf):
-                    for l in range(nbf):
-                        J_alpha[i, j] += eri_tensor[i, j, k, l] * Cocc_a[k, 0] * Cocc_a[l, 0]
-    
-                # Compute Coulomb term for beta electrons
-                for k in range(nbf):
-                    for l in range(nbf):
-                        J_beta[i, j] += eri_tensor[i, j, k, l] * Cocc_b[k, 0] * Cocc_b[l, 0]
-    
-        # Return the computed Coulomb matrices
-        return J_alpha, J_beta
-       '''
+       # Corrected compute_hartree method
        def compute_hartree(self, Cocc_a=None, Cocc_b=None):
-        """
-        Generates Coulomb and Exchange matrices from occupied orbitals.
-        If the occupied orbital coefficients (Cocc_a and Cocc_b) are not provided,
-        they are computed using the ScfRestrictedDriver.
-        Parameters
-        ----------
-        Cocc_a : array-like, optional
-        Occupied orbital coefficients for alpha electrons.
-        Cocc_b : array-like, optional
-        Occupied orbital coefficients for beta electrons.
-        Returns
-        -------
-        J : tuple of np.ndarray
-        A tuple containing (J_alpha, J_beta), the Coulomb matrices for alpha and beta spins.
-        """
-        # Compute the occupied orbital coefficients if not provided.
+        print("stuck")
         if Cocc_a is None or Cocc_b is None:
-             scf_results = veloxchem.ScfRestrictedDriver().compute(self.mol, self.basis)
-             Cocc_a = scf_results["C_alpha"]
-             Cocc_b = scf_results["C_beta"]
-        if not hasattr(self, 'jk') or self.jk is None:
-           self.jk = CoulombExchangeOperator()  # Example initialization; replace with actual class
-        # Add the occupied orbital contributions to the JK object.
-        self.jk.C_left_add(Cocc_a)
-        self.jk.C_left_add(Cocc_b)
-        # Compute the Coulomb (and possibly Exchange) matrices.
-        self.jk.compute()
-        # Clear the accumulated contributions so that future computations are not affected.
-        self.jk.C_clear()
-        # Retrieve the computed matrices.
-        # Assuming self.jk.J() returns a sequence (e.g., [J_alpha, J_beta]),
-        # we convert these to NumPy arrays.
-        J_results = self.jk.J()
-        J = (np.array(J_results[0]), np.array(J_results[1]))
-        return J
-        '''
-       def hartree_NO(self):
-        """
-        Computes the Hartree potential in the AO basis from Natural Orbitals.
-
-        Returns
-        -------
-        J0 : tuple of np.ndarray
-            The Coulomb (and possibly exchange) matrices computed from the natural orbital basis.
-
-        Raises
-        ------
-        ValueError
-            If SCF results are not available.
-        """
-        if not hasattr(self, "scf_results"):
-            raise ValueError("SCF calculation has not been performed. Run set_system() first.")
-
-        # Extract the alpha density matrix
-        Dta = self.scf_results.Da()
-
-        # Diagonalize the alpha density matrix
-        eigvals, C_NO = np.linalg.eigh(Dta)
-
-        # Sort eigenvalues and eigenvectors in descending order
-        order = np.argsort(eigvals)[::-1]
-        eigvals = eigvals[order]
-        C_NO = C_NO[:, order]
-
-        # Compute square root of occupation numbers
-        occ = np.sqrt(np.maximum(eigvals, 0))  # Ensure non-negative values
-
-        # Construct natural orbital coefficient matrix
-        new_CA = C_NO * occ
-
-        # Validate reconstructed density
-        if not np.allclose(new_CA @ new_CA.T, Dta, atol=1e-8):
-            raise ValueError("Reconstructed density matrix does not match the input density matrix.")
-
-        # Handle unrestricted case (beta density matrix)
-        if self.ref == 1:
-            new_CB = new_CA.copy()
-        else:
-            Dtb = self.scf_results.Db()
-            eigvals_b, C_NO_b = np.linalg.eigh(Dtb)
-            order_b = np.argsort(eigvals_b)[::-1]
-            eigvals_b = eigvals_b[order_b]
-            C_NO_b = C_NO_b[:, order_b]
-            occ_b = np.sqrt(np.maximum(eigvals_b, 0))  # Ensure non-negative values
-            new_CB = C_NO_b * occ_b
-
-        # Compute Hartree potential (Coulomb matrix)
-        J0 = self.compute_hartree(new_CA, new_CB)
-        return J0
+            # Corrected module name from vlx to veloxchem
+            scf_drv = veloxchem.ScfRestrictedDriver() if self.ref == 1 else veloxchem.ScfUnrestrictedDriver()
+            print("crossed")
+            scf_results = scf_drv.compute(self.mol, self.basis)
+            Cocc_a = scf_results['C_alpha'][:, :self.nalpha]
+            Cocc_b = scf_results['C_beta'][:, :self.nbeta] if self.ref == 2 else Cocc_a
+        D_a = Cocc_a @ Cocc_a.T
+        D_b = Cocc_b @ Cocc_b.T if self.ref == 2 else D_a
+        D_total = D_a + D_b if self.ref == 2 else 2 * D_a  # For RHF, D_total is 2*D_a
+        print(self.g.shape)
+        print(D_total.shape)
+ 
+        # Corrected contraction for exchange matrix
+        J = contract("ijkl,kl->ij", self.g, D_total)
+        K = contract("iklj,kl->ij", self.g, D_total)  # Fixed indices
+        print("we are stuck here") 
+        return J, K  # Return J and K separately for flexibility
        def hartree_NO(self, Dta):
         """
         Computes the Hartree potential in the AO basis from Natural Orbitals.
@@ -404,8 +239,6 @@ class VeloxchemEngine(Engine):
         ValueError
         If no wavefunction (wfn) object is provided.
         """
-        if self.wfn is None:
-          raise ValueError("Please provide a wavefunction object to the Inverter, e.g., Inverter.eng = wfn")
         # For VeloxChem, assume that the density matrix is available as Dta (a NumPy array)
         # You might also have a method such as self.wfn.Da() to obtain it.
         # Diagonalize Dta using numpy.linalg.eigh (which returns eigenvalues in ascending order)
