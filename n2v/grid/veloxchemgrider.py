@@ -11,7 +11,8 @@ from gbasis.evals.density import (
 from gbasis.evals.eval import evaluate_basis
 from gbasis.evals.eval_deriv import evaluate_deriv_basis
 from gbasis.evals.electrostatic_potential import point_charge_integral
-
+from gbasis.integrals.electron_repulsion import electron_repulsion_integral
+from gbasis.contractions import GeneralizedContractionShell
 
 import numpy as np
 from opt_einsum import contract
@@ -30,31 +31,28 @@ if has_veloxchem:
     from gbasis.evals.electrostatic_potential import point_charge_integral
 
     class VeloxchemGrider:
-        def __init__(self, mol, pbs_mol=None, basis_str=None, basis_file=None, ref=None):
+        def __init__(self, mol, pbs_mol=None, basis_str=None, ref=None):
            self.mol = mol
         # Handle user-defined basis set
-           if basis_str:
-             print(f"Basis being passed to MolecularBasis.read: {basis_str} (Type: {type(basis_str)})")
-             if not isinstance(basis_str, str):
-                raise ValueError(f"Expected basis_str to be a string, but got {type(basis_str)}")
-             self.basis = vlx.MolecularBasis.read(mol, basis_str)
-           elif basis_file:
-               self.basis = vlx.MolecularBasis.read_from_file(basis_file, mol)
-           else:
-               self.basis = vlx.MolecularBasis.read(mol, "def2-SVP")  # Default to def2-SVP if no input provided
-           self.pbs = vlx.MolecularBasis.read(pbs_mol, "def2-SVP") if pbs_mol else None
+           self.basis = vlx.MolecularBasis.read(mol, basis_str)
+           self.pbs = vlx.MolecularBasis.read(pbs_mol,basis_str) if pbs_mol else None
            self.ref = ref
            try:
-            self.atomic_charges = self.mol.get_charge()  # Replace with the correct method if necessary
+            #self.atomic_charges = np.array(self.mol.get_charge())
+            atomic_composition = self.mol.get_elemental_composition()
+            atomic_charges = np.array([])
+            for element in atomic_composition:
+                 atomic_charges = np.append(atomic_charges,element)
+            self.atomic_charges = atomic_charges
+            print(f"atomic_charges shape: {self.atomic_charges.shape}")# Replace with the correct method if necessary
            except AttributeError:
             print("Error: 'get_nuclear_charges' not found in the Molecule class.")
            try:
             # Assuming that you want to get the coordinates for all atoms
-            self.atomic_coords = [self.mol.get_atom_coordinates(i) for i in range(self.mol.number_of_atoms())]
+            self.atomic_coords = np.array([self.mol.get_atom_coordinates(i) for i in range(self.mol.number_of_atoms())])
+            print(f"atomic_coords shape: {self.atomic_coords.shape}")
            except AttributeError:
             print("Error: 'get_nuclear_coordinates' not found in the Molecule class.")
-           #self.atomic_charges = self.mol.nuclear_charges()
-           #self.atomic_coords = self.mol.nuclear_coordinates()
            # Perform SCF Calculation based on ref
            if self.ref == 1:
              scf_drv = vlx.ScfRestrictedDriver()
@@ -62,16 +60,16 @@ if has_veloxchem:
              scf_drv = vlx.ScfUnrestrictedDriver()
            # Perform a quick LDA calculation to generate density matrices.
            self.scf_results = scf_drv.compute(mol, self.basis)
-           print(self.scf_results.keys())
-
            # Extract density matrix from SCF results
            self.Da = self.scf_results['D_alpha']
            if self.ref != 1:
             self.Db = self.scf_results['D_beta']
 
            grid_drv = GridDriver()
-           molgrid = grid_drv.generate(mol)  # Generate grid for the molecule
-           print(dir(molgrid))
+           grid_drv.set_level(5)
+           molgrid = grid_drv.generate(mol) # Generate grid for the molecule
+           self.molgrid = molgrid
+           print("hello spherical",dir(molgrid))
            # Step 2: Access grid points and weights
            x_coords = molgrid.x_to_numpy()  # Get x coordinates as a NumPy array
            y_coords = molgrid.y_to_numpy()  # Get y coordinates as a NumPy array
@@ -80,104 +78,40 @@ if has_veloxchem:
            self.spherical_points = coords  # Get grid points as NumPy array
            self.w = molgrid.w_to_numpy()  # Get weights for integration
 
-        def generate_grid(self, grid_spacing=0.2):
-            """
-            Generates a simple rectangular grid.
-            """
-            min_bounds = np.min(self.atomic_coords, axis=0) - 2.0
-            max_bounds = np.max(self.atomic_coords, axis=0) + 2.0
-
-            x = np.arange(min_bounds[0], max_bounds[0], grid_spacing)
-            y = np.arange(min_bounds[1], max_bounds[1], grid_spacing)
-            z = np.arange(min_bounds[2], max_bounds[2], grid_spacing)
-
-            grid_points = np.array(np.meshgrid(x, y, z)).T.reshape(-1, 3)
-            weights = np.full(len(grid_points), grid_spacing**3)
-
-            return grid_points, weights
-        def assert_grid(self, grid_type):
-            """
-            Asserts the type of grid (spherical or rectangular) and returns the corresponding points.
-            """
-            if isinstance(grid_type, np.ndarray) or isinstance(grid_type, list):
-                if 'spherical' in grid_type:
-                    points = self.spherical_points
-                elif 'rectangular' in grid_type:
-                    if self.rectangular_grid is None:
-                        raise ValueError("Rectangular grid must be defined first. Please generate the grid before accessing it.")
-                    points = self.rectangular_grid
-                else:
-                    raise ValueError("Invalid grid type specified. Use either 'spherical' or 'rectangular'.")
+        def assert_grid(self, grid):
+            if grid == 'spherical':
+                points = self.spherical_points
+            elif grid == 'rectangular':
+                assert self.rectangular_grid is not None, "Rectangular Grid must be defined first"
+                points = self.rectangular_grid
             else:
-                # Proceed with the normal string comparison if it's a single string
-                if grid_type == 'spherical':
-                    points = self.spherical_points
-                elif grid_type == 'rectangular':
-                    if self.rectangular_grid is None:
-                        raise ValueError("Rectangular grid must be defined first. Please generate the grid before accessing it.")
-                    points = self.rectangular_grid
-                else:
-                    raise ValueError("Invalid grid type specified. Use either 'spherical' or 'rectangular'.")
+                raise ValueError("Specify either spherical or rectangular grid")
+
             return points
-        '''
-        def assert_grid(self, grid_type):
-            """
-            Asserts the type of grid (spherical or rectangular) and returns the corresponding points.
-            Parameters
-            ----------
-            grid_type : str
-            The type of grid to use ('spherical' or 'rectangular').
-            Returns
-            -------
-            np.ndarray
-            The grid points corresponding to the requested grid type.
-            Raises
-            ------
-            ValueError
-            If the grid type is not recognized or if the rectangular grid is not defined.
-            """
-            if grid_type == 'spherical':
-             # VeloxChem stores spherical grid points, so return them here.
-             points = self.spherical_points
-            elif grid_type == 'rectangular':
-             if self.rectangular_grid is None:
-              raise ValueError("Rectangular grid must be defined first. Please generate the grid before accessing it.")
-             # Return the rectangular grid points.
-             points = self.rectangular_grid
-            else:
-              raise ValueError("Invalid grid type specified. Use either 'spherical' or 'rectangular'.")
-            return points
-        '''    
         def generate_grid(self, x, y, z):
             """
-            Generates a cubic mesh grid from 3 separate linear spaces (x, y, z),
-            and flattens the result into a 2D array.
+            Genrates Mesh from 3 separate linear spaces and flatten,
+            needed for cubic grid.
             Parameters
             ----------
-            x : np.ndarray
-            The 1D array of x coordinates.
-            y : np.ndarray
-            The 1D array of y coordinates.
-            z : np.ndarray
-            The 1D array of z coordinates.
+            grid: tuple of three np.ndarray
+                (x, y, z)
             Returns
             -------
-            grid : np.ndarray
-            A 2D array of shape (3, len(x)*len(y)*len(z)) containing the mesh points.
-            shape : tuple
-            A tuple containing the shape (len(x), len(y), len(z)) for the mesh grid.
+            grid: np.ndarray
+                shape (3, len(x)*len(y)*len(z)).
             """
-            # Generate a meshgrid from x, y, z using 'ij' indexing (which is typical for Cartesian grids)
+            # x,y,z, = grid
             shape = (len(x), len(y), len(z))
-            X, Y, Z = np.meshgrid(x, y, z, indexing='ij')
-            # Flatten the meshgrid coordinates
-            X = X.reshape((-1, 1))  # Reshape to (num_points, 1)
-            Y = Y.reshape((-1, 1))  # Reshape to (num_points, 1)
-            Z = Z.reshape((-1, 1))  # Reshape to (num_points, 1)
-            # Concatenate the X, Y, Z coordinates to create a grid
-            grid = np.concatenate((X, Y, Z), axis=1).T  # Shape: (3, num_points)
+            X,Y,Z = np.meshgrid(x, y, z, indexing='ij')
+            X = X.reshape((X.shape[0] * X.shape[1] * X.shape[2], 1))
+            Y = Y.reshape((Y.shape[0] * Y.shape[1] * Y.shape[2], 1))
+            Z = Z.reshape((Z.shape[0] * Z.shape[1] * Z.shape[2], 1))
+            grid = np.concatenate((X,Y,Z), axis=1).T
+
             return grid, shape
-        def build_rectangular(self, npoints, overage=3.0):
+
+        def build_rectangular(self, npoints):
             """
             Builds a rectangular grid that encompasses the molecule.
             Parameters
@@ -187,121 +121,174 @@ if has_veloxchem:
             overage: float
             Spatial extent to extend the grid around the molecule (default: 3.0 Å)
             """
-            # Get the atomic coordinates of the molecule
-            atom_coords = self.mol.atom_coords()
-            # Determine the minimum and maximum values for each dimension (x, y, z)
-            xmin, xmax = np.min(atom_coords[:, 0]), np.max(atom_coords[:, 0])
-            ymin, ymax = np.min(atom_coords[:, 1]), np.max(atom_coords[:, 1])
-            zmin, zmax = np.min(atom_coords[:, 2]), np.max(atom_coords[:, 2])
-            # Add the overage (padding) around the molecule's bounding box
-            xmin -= overage
-            xmax += overage
-            ymin -= overage
-            ymax += overage
-            zmin -= overage
-            zmax += overage
-            # Generate equally spaced points in each dimension
-            x_grid = np.linspace(xmin, xmax, npoints[0])
-            y_grid = np.linspace(ymin, ymax, npoints[1])
-            z_grid = np.linspace(zmin, zmax, npoints[2])
-            # Create the 3D meshgrid
-            gx, gy, gz = np.meshgrid(x_grid, y_grid, z_grid)
-            # Flatten the meshgrid into a 2D array (each row is a 3D point)
-            g3d = np.vstack([gx.ravel(), gy.ravel(), gz.ravel()]).T
-            # Store the grid and the grid extents
-            self.x = x_grid
-            self.y = y_grid
-            self.z = z_grid
+            g1 = np.linspace(-10, 10, npoints[0])
+            g2 = np.linspace(0, 0, npoints[1])
+            g3 = np.linspace(0, 0, npoints[2])
+            gx, gy, gz = np.meshgrid(g1, g2, g3)
+            g3d = np.vstack( [gx.ravel(), gy.ravel(), gz.ravel()] ).T
+
+            self.x                = g1
+            self.y                = g2
+            self.z                = g3
             self.rectangular_grid = g3d
+
+
         def density(self, Da, Db=None, grid='spherical'):
             """
             Computes the density on the grid.
+        
             Parameters
             ----------
             Da : np.ndarray
-            Density matrix in AO basis for alpha electrons.
+                Density matrix in AO basis for alpha electrons.
             Db : np.ndarray, optional
-            Density matrix in AO basis for beta electrons (only used if provided).
+                Density matrix in AO basis for beta electrons (only used if provided).
             grid : str, optional
-            Type of grid to use. Default is 'spherical'. If 'rectangular' is chosen,
-            `self.rectangular_grid` must be defined.
+                Type of grid to use. Default is 'spherical'. If 'rectangular' is chosen,
+                `self.rectangular_grid` must be defined.
+        
             Returns
             -------
             density_g : np.ndarray
-            Density on the requested grid.
+                Total density on the requested grid (alpha + beta if provided).
             """
+            n_elec = []
             # Ensure the grid is valid and fetch the grid points
-            points = self.assert_grid(grid)
-            # Evaluate the density using the provided density matrices and basis
-            density_a = evaluate_density(Da, self.basis, points)
-            # If beta density is provided, compute density for both alpha and beta
+            print("Da shape:", Da.shape)
+            print("self_ao", self.to_ao())
+            print("Type of self.to_ao:", type(self.to_ao()))
+
+            #self.to_ao = np.array(self.to_ao())
+            print("self.to_ao shape:", self.to_ao().shape)
+
+            # determine the density on the grid points
+            G = np.einsum("ab,bg->ag", Da, self.to_ao())
+            n_g = np.einsum("ag,ag->g", self.to_ao(), G)
+            #n_elec.append(np.dot(self.w, n_g))
+            density_a =  n_g         # evaluate_density(Da, self.basis, points)
+            
+            # Initialize total density
+            density_g = density_a
+            
+            # Add beta density if provided
             if Db is not None:
-             density_b = evaluate_density(Db, self.basis, points)
-             density_g = np.concatenate([density_a, density_b])
-             return density_g
-            else:
-            # If no beta density is provided, return only alpha density
-             return density_a
-        def hartree(self, density, grid='spherical'):
+                G = np.einsum("ab,bg->ag", Db, self.to_ao())
+                n_g = np.einsum("ag,ag->g", self.to_ao(), G)
+                #n_elec.append(np.dot(self.w, n_g))
+                density_b = n_g                     #evaluate_density(Db, self.basis, points)
+                density_g += density_b  # Sum densities instead of concatenating
+            
+            return density_g
+
+        def hartree(self, Da, Db=None, grid='spherical'):
             """
-            Computes Hartree Potential on grid. 
-
-            Parameters
-            ----------
-
-            density: np.ndarray.
-                Density in AO basis
-
-            grid: str.
-                Type of grid used. Default spherical 
-                If 'rectangular' used self.rectangular_grid != None 
-
-
-            Returns
-            -------
-
-            hartree_potential: np.ndarray
-                Hartree potential on the requested grid
-            """        
-            points = self.assert_grid(grid)
-
-            hartree_potential = point_charge_integral(self.basis, 
-                                                    points, 
-                                                    -np.ones(points.shape[0]), 
-                                                    transform=None, 
-                                                    coord_type='spherical')
-
-            hartree_potential *= density[:, :, None]
-            hartree_potential = np.sum(hartree_potential, axis=(0, 1))
-
-            return hartree_potential
-
+            Compute the Hartree integral of the density on the grid points with the interaction term 1/(r - r').
+        
+            Parameters:
+            - Da: np.ndarray, density matrix for alpha electrons in AO basis
+            - Db: np.ndarray, optional, density matrix for beta electrons (only used if provided)
+        
+            Returns:
+            - result: float, the evaluated result of the Hartree integral.
+            """
+        
+            # Step 2: Compute the density on the grid
+            if Db is None:
+                density_grid = self.density(Da)  # Compute density only for alpha
+            else:
+                density_grid = self.density(Da, Db)  # Compute total density
+        
+            # Step 3: Initialize the result array
+            result = np.zeros(self.spherical_points.shape[0])  # One value per grid point
+        
+            # Step 4: Loop over grid points
+            for i, r in enumerate(self.spherical_points):  # Loop over r
+                for j, r_prime in enumerate(self.spherical_points):  # Loop over r'
+                    if i == j:
+                        continue  # Skip self-interaction (r == r')
+        
+                    # Compute distance |r - r'|
+                    r_diff = r - r_prime
+                    r_dist = np.linalg.norm(r_diff)
+        
+                    # Interaction term 1 / |r - r'|
+                    interaction_term = 1 / r_dist
+        
+                    # Density at r'
+                    density_at_r_prime = density_grid[j]  
+        
+                    # Compute contribution to the integral
+                    result[i] += density_at_r_prime * interaction_term * self.w[j]  # Weighted sum
+        
+            # Step 5: Sum over all grid points
+            total_result = -np.sum(result)  # Applying the final sum and sign convention
+        
+            return total_result
+        '''
         def external(self, grid='spherical'):
             """
-            Computes External Potential on grid. 
-
+            Computes External Potential on grid.
+        
             Parameters
             ----------
             grid: str
-                Type of grid used. Default spherical 
-                If 'rectangular' used self.rectangular_grid != None
-
+                Type of grid used. Default spherical.
+                If 'rectangular' used, self.rectangular_grid != None
+        
             Returns
             -------
             external_potential: np.ndarray
-                External potential on the given grid. 
-            """        
-            points = self.assert_grid(grid)       
-
-            old_settings = np.seterr(divide="ignore")  # silence warning for dividing by zero
-            external_potential = self.atomic_charges[None, :] \
-            / (np.sum((points[:, :, None] - self.atomic_coords.T[None, :, :]) ** 2, axis=1) ** 0.5)
+                External potential on the given grid.
+            """
+            # Generate the grid for the molecule
+        
+        
+            # Compute external potential
+            old_settings = np.seterr(divide="ignore")  # Silence warning for dividing by zero
+            external_potential = np.sum(
+                self.atomic_charges[None, :] / np.linalg.norm(self.spherical_points[:, :, None] - self.atomic_coords.T[None, :, :], axis=1),
+                axis=1
+            )
             np.seterr(**old_settings)
-
-            if external_potential.ndim > 1:
-                external_potential = np.sum(external_potential, axis=1)
-
+        
             return -external_potential
+        '''
+        def external(self, grid='spherical', threshold_dist=0.0):
+            """
+            Computes External Potential on grid, with the option to zero out potentials
+            for elements that are too close to the nucleus based on a threshold distance.
+        
+            Parameters
+            ----------
+            grid: str
+                Type of grid used. Default spherical.
+                If 'rectangular' used, self.rectangular_grid != None
+            threshold_dist: float or list, optional
+                Threshold distance to zero out potentials for elements too close to the nucleus.
+                If not provided, no zeroing occurs.
+        
+            Returns
+            -------
+            external_potential: np.ndarray
+                External potential on the given grid.
+            """
+            # Generate the grid for the molecule
+        
+            # Compute external potential
+            old_settings = np.seterr(divide="ignore")  # Silence warning for dividing by zero
+            external_potential = (self.atomic_charges[None, :] / np.sum((np.linalg.norm(self.spherical_points[:, :, None] - self.atomic_coords.T[None, :, :])**2))**0.5)
+            
+            # Zero out potentials of elements that are too close to the nucleus
+            external_potential[external_potential > 1.0 / np.array(threshold_dist)] = 0 
+            # Restore old settings
+            np.seterr(**old_settings)
+            external_potential = -np.sum(external_potential, axis=1)
+
+            # Sum over potentials for each dimension (if necessary)
+            #external_potential = -np.sum(external_potential)
+        
+            return external_potential[0]
+
 
         def to_grid(self, f_nm, grid='spherical'):
             """
@@ -336,7 +323,7 @@ if has_veloxchem:
 
             return f_g
 
-        def to_ao(self, f_g, grid='spherical'):
+        def to_ao(self, grid='spherical'):
             """
             Expresses grid quantity on the AO basis
 
@@ -352,14 +339,16 @@ if has_veloxchem:
             f_nm: np.ndarray
                 f_g in ao basis
             """
-
+            xc_drv = vlx.XCIntegrator()
+            chi_g = np.array(xc_drv.compute_gto_values(self.mol, self.basis, self.molgrid))
+            '''
             points = self.assert_grid(grid)
 
             phis = evaluate_basis(self.basis, points)
             f_nm = contract( 'pb, p,p,pa->ab', phis.T, f_g, self.w, phis.T )
             f_nm = 0.5 * (f_nm + f_nm.T)
-
-            return f_nm
+            '''
+            return chi_g
         
         def orbitals(self, C, grid='spherical'):
             """

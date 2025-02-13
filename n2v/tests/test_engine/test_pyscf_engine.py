@@ -3,7 +3,7 @@ from pyscf import gto, scf, lib, dft, ao2mo, df
 import pytest
 import numpy as np
 
-@pytest.fixture
+#@pytest.fixture
 def ine():
     # Define Molecule
     Ne = gto.M(atom = """

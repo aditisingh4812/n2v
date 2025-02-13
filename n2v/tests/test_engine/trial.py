@@ -62,7 +62,6 @@ drho =  np.einsum('ij,gi,gj->g', delta_rho, ca, ca)
 print("drho", drho)
 # Define the grid
 coords = np.array([(0., 0., x) for x in np.linspace(-5, 5, 43)])  # Custom grid points
-exit()
 
 da1 = da + delta_rho
 # Overwrite the Density matrix
@@ -105,8 +104,8 @@ vH1 = inv.eng.grid.esp(Da=inv.Dt[0], Db=inv.Dt[1], grid=grid)[1]
 vFA1 = (1-1/(inv.nalpha + inv.nbeta)) * vH1
 
 vrest1 = inv.eng.grid.ao(inv.v_pbs, grid=grid, basis=inv.eng.pbs)  # Note that specify the basis set 
-                                                                  # that vrest is on.
-    
+print("inv.v_pbs",inv.v_pbs)                                                                  # that vrest is on.
+print("done")    
 # Compute vxc according to the previous equation. 
 vxc1 = vFA1 + vrest1 - vH1
 ########################################################################################################

@@ -5,8 +5,8 @@ import matplotlib.pyplot as plt
 
 molecule_data = """2
 
-C        0.00000000    0.00000000   -0.71500000
-O        0.00000000    0.00000000    0.71500000
+H    0.000000000000        0.740848095288        0.582094932012
+H    0.000000000000       -0.740848095288        0.582094932012
 """
 
 # Instead of passing a Molecule object, you pass the molecule_data string
@@ -14,37 +14,26 @@ molecule = vlx.Molecule.read_xyz_string(molecule_data)
 print(dir(molecule))
 # Now you can set the system
 basis = 'sto-3g'
-basis1 = vlx.MolecularBasis.read(molecule, basis, ostream=None)
-ao_basis_map = basis1.get_ao_basis_map(molecule)
-print("ao_basis_map",ao_basis_map)
-label = basis1.get_label()
+basis = vlx.MolecularBasis.read(molecule, basis, ostream=None)
+print(dir(basis))
+label = basis.get_label()
 print("Basis set label:", label)
+print(basis.get_string(label, molecule).expandtabs)
+print(dir(basis.get_string(label, molecule)))
 
-#nbf = basis1.get_dimension_of_basis(molecule)
-#print("nbf",nbf)
+nbf = basis.get_dimension_of_basis(molecule)
+print("nbf",nbf)
 ref =1
 scf_drv = vlx.ScfRestrictedDriver()
+#scf_drv.ostream.mute()
+#print(dir(scf_drv))
+scf_result = scf_drv.compute(molecule, basis)
 
-scf_result = scf_drv.compute(molecule, basis1)
+print("scf_density_shape",np.array(scf_result['D_alpha'][0]))   #.shape())
+basis = 'sto-3g'
 inv = n2v.Inverter(engine='veloxchem')
-print("dir(molecule)")
-# Assuming molecule.get_charge() provides a list of charges for each atom
-atomic_charges = molecule.get_elemental_composition()
-# Let's first check the composition to make sure it is a set
-atomic_composition = molecule.get_elemental_composition()
-# 'atomic_composition' is a set, for example: {8, 6}
-
-atomic_charges = np.array([])
-for element in atomic_composition:
-    atomic_charges = np.append(atomic_charges,element)
-
-print(atomic_charges)
-# Assuming that you want to get the coordinates for all atoms
-atomic_coords = np.array([molecule.get_atom_coordinates(i) for i in range(molecule.number_of_atoms())])
-print(f"atomic_coords shape: {atomic_coords.shape}")
-
 # **Call from_scf() to initialize densities and orbitals properly**
-inv.set_system(molecule_data, basis, ref=ref)
+inv.set_system(molecule_data, basis, ref=ref, pbs='same')
 inv.Dt = [scf_result['D_alpha'], scf_result['D_alpha']]  # Density matrices for alpha and beta
 print("inv_Dt",inv.Dt)
 
@@ -53,9 +42,13 @@ inv.ct = [scf_result['C_alpha'], scf_result['C_beta']]  # Coefficients for alpha
 inv.et = [scf_result['E_alpha'], scf_result['E_beta']]  # Eigenvalues for alpha and beta
 
 inv.from_scf(scf_result,molecule_data,basis)
+
 # Now, you can proceed with inversion
-inv.invert("wuyang", opt_max_iter=1000, opt_method="trust-exact", reg=0, gtol=1e-6, guide_components="fermi_amaldi")
+inv.invert("wuyang", opt_max_iter=100, opt_method="trust-exact", reg=0, gtol=1e-6, guide_components="fermi_amaldi")
+
 inv.Dt = np.array(inv.Dt, dtype =float)
+exit()
+
 grid_drv = vlx.GridDriver()
 molgrid = grid_drv.generate(molecule)  # Generate grid for the molecule
 print(dir(molgrid))
@@ -77,18 +70,26 @@ inv.ct = [scf_result['C_alpha'], scf_result['C_beta']]  # Coefficients for alpha
 inv.et = [scf_result['E_alpha'], scf_result['E_beta']]  # Eigenvalues for alpha and beta
 # 3. Assign grid to VeloxchemGrider
 inv.eng.grid.spherical_grid = spherical_points
-#total_density = inv.Dt[0] + inv.Dt[1]
+total_density = inv.Dt[0] + inv.Dt[1]
 #inv.invert('mRKS', vxc_grid=grid, opt_max_iter=30, frac_old=0.8, init='scan')
-#print("Total density shape:", total_density.shape)  # Should be (nbf, nbf)
+print("Total density shape:", total_density.shape)  # Should be (nbf, nbf)
 print("Grid points shape:", inv.eng.grid.spherical_grid.shape)  # Should be (N, 3)
 # Evaluate density at grid points
-density = inv.eng.grid.density(scf_result['D_alpha'], scf_result['D_beta'],grid='spherical')
-print("density", density)
-vext = inv.eng.grid.external( grid='spherical') 
-print("vext",vext)
+density = inv.eng.grid.density(total_density,grid='spherical')
+exit()
+'''
+density_values = evaluate_density(
+    one_density_matrix=total_density_matrix,
+    basis=molecule.get_basis(),
+    points=spherical_points,
+    threshold=1e-8
+)  # Shape (37964,)
+'''
 #vH = inv.eng.grid.hartree(density=total_density, grid='spherical')  # Specify grid type
 
-vH = inv.eng.grid.hartree(Da=scf_result['D_alpha'])
+
+exit()
+vH = inv.eng.grid.hartree(density=inv.Dt)
 exit()
 #inv.from_scf(scf_result)
 # Now, pass scf_results to set_system
