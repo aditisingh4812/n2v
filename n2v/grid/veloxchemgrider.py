@@ -2,12 +2,14 @@
 grider_veloxchem.py
 Grider for VeloxChem
 """
+import inspect
+
 import veloxchem 
 from gbasis.evals.density import (
     evaluate_density,
     evaluate_density_laplacian,
-    evaluate_density_gradient,
-)
+    evaluate_density_gradient)
+from gbasis.evals.density import evaluate_density
 from gbasis.evals.eval import evaluate_basis
 from gbasis.evals.eval_deriv import evaluate_deriv_basis
 from gbasis.evals.electrostatic_potential import point_charge_integral
@@ -16,13 +18,15 @@ from gbasis.contractions import GeneralizedContractionShell
 
 import numpy as np
 from opt_einsum import contract
+import basis_set_exchange as bse
+import json
 
+print(inspect.getfile(point_charge_integral))
 try:
     import veloxchem
     has_veloxchem = True
 except ImportError:
     has_veloxchem = False
-
 if has_veloxchem:
     import veloxchem as vlx
     from veloxchem import GridDriver
@@ -31,11 +35,30 @@ if has_veloxchem:
     from gbasis.evals.electrostatic_potential import point_charge_integral
 
     class VeloxchemGrider:
-        def __init__(self, mol, pbs_mol=None, basis_str=None, ref=None):
+        def __init__(self, mol, pbs_mol=None, basis_str=None, ref=None, grid_level=5,scf_results=None):
            self.mol = mol
         # Handle user-defined basis set
            self.basis = vlx.MolecularBasis.read(mol, basis_str)
+           print("self basis shape",dir(self.basis))
            self.pbs = vlx.MolecularBasis.read(pbs_mol,basis_str) if pbs_mol else None
+           # Define the basis set name you want to use
+           self.basis_name = basis_str
+           # Extract element IDs
+           elem_ids = mol.elem_ids_to_numpy()
+           print("elem_ids",elem_ids)
+           atomic_number_to_symbol = {
+           '1': 'H', '2': 'He', '3': 'Li', '4': 'Be', '5': 'B', '6': 'C', '7': 'N', '8': 'O',
+           '9': 'F', '10': 'Ne', '11': 'Na', '12': 'Mg', '13': 'Al', '14': 'Si', '15': 'P', '16': 'S',
+           '17': 'Cl', '18': 'Ar', '19': 'K', '20': 'Ca', '21': 'Sc', '22': 'Ti', '23': 'V', '24': 'Cr',
+           '25': 'Mn', '26': 'Fe', '27': 'Co', '28': 'Ni', '29': 'Cu', '30': 'Zn', '31': 'Ga', '32': 'Ge',
+           '33': 'As', '34': 'Se', '35': 'Br', '36': 'Kr'
+            }
+           # Map atomic numbers to element symbols
+           unique_elements = list([atomic_number_to_symbol[str(atom)] for atom in elem_ids])
+           print("unique_elements",unique_elements)
+           # Extract the basis set from Basis Set Exchange (BSE)
+           #self.basis_exchange = self.get_basis_set_for_elements(unique_elements,basis_str)
+           self.element_basis_data = self.get_basis_set_for_elements(unique_elements,basis_str)
            self.ref = ref
            try:
             #self.atomic_charges = np.array(self.mol.get_charge())
@@ -51,6 +74,9 @@ if has_veloxchem:
             # Assuming that you want to get the coordinates for all atoms
             self.atomic_coords = np.array([self.mol.get_atom_coordinates(i) for i in range(self.mol.number_of_atoms())])
             print(f"atomic_coords shape: {self.atomic_coords.shape}")
+            print("self.atomic_coords",self.atomic_coords)
+            print(type(self.atomic_coords))  # Should be <class 'numpy.ndarray'>
+
            except AttributeError:
             print("Error: 'get_nuclear_coordinates' not found in the Molecule class.")
            # Perform SCF Calculation based on ref
@@ -58,32 +84,116 @@ if has_veloxchem:
              scf_drv = vlx.ScfRestrictedDriver()
            else:
              scf_drv = vlx.ScfUnrestrictedDriver()
-           # Perform a quick LDA calculation to generate density matrices.
-           self.scf_results = scf_drv.compute(mol, self.basis)
-           # Extract density matrix from SCF results
-           self.Da = self.scf_results['D_alpha']
-           if self.ref != 1:
-            self.Db = self.scf_results['D_beta']
-
+           scf_drv.xcfun = "slater"
+           self.grid_level = grid_level
            grid_drv = GridDriver()
-           grid_drv.set_level(5)
+           grid_drv.set_level(grid_level)
            molgrid = grid_drv.generate(mol) # Generate grid for the molecule
            self.molgrid = molgrid
-           print("hello spherical",dir(molgrid))
+           print("molgrid_dir", dir(molgrid))
            # Step 2: Access grid points and weights
            x_coords = molgrid.x_to_numpy()  # Get x coordinates as a NumPy array
            y_coords = molgrid.y_to_numpy()  # Get y coordinates as a NumPy array
            z_coords = molgrid.z_to_numpy()  # Get z coordinates as a NumPy array
            coords = np.vstack((x_coords, y_coords, z_coords)).T  # Combine into a single array of coordinates
+           print("coords.shape",coords.shape)
            self.spherical_points = coords  # Get grid points as NumPy array
            self.w = molgrid.w_to_numpy()  # Get weights for integration
+           self.rectangular_grid = None
+           if scf_results is not None:
+              self.scf_results = scf_results
+           else: 
+              self.scf_results = scf_drv.compute(self.mol, self.basis)
+
+           # Extract density matrix from SCF results
+           self.Da = self.scf_results['D_alpha']
+           if self.ref != 1:
+            self.Db = self.scf_results['D_beta']
+           self.converted = self.convert_to_generalized_shell()
+        # Function to extract basis set details from BSE for a given element
+        def get_basis_set_for_elements(self, elements, basis_name):
+            atomic_number_to_symbol = {
+                '1': 'H', '2': 'He', '3': 'Li', '4': 'Be', '5': 'B', '6': 'C', '7': 'N', '8': 'O',
+                '9': 'F', '10': 'Ne', '11': 'Na', '12': 'Mg', '13': 'Al', '14': 'Si', '15': 'P', '16': 'S',
+                '17': 'Cl', '18': 'Ar', '19': 'K', '20': 'Ca', '21': 'Sc', '22': 'Ti', '23': 'V', '24': 'Cr',
+                '25': 'Mn', '26': 'Fe', '27': 'Co', '28': 'Ni', '29': 'Cu', '30': 'Zn', '31': 'Ga', '32': 'Ge',
+                '33': 'As', '34': 'Se', '35': 'Br', '36': 'Kr'
+            }
+            
+            basis_data = bse.get_basis(basis_name, fmt='json')
+            basis_dict = json.loads(basis_data)
+        
+            # Print available elements in the basis set
+            print(f"Available elements in {basis_name}:")
+            print(basis_dict['elements'].keys())
+        
+            element_basis_data = {}
+        
+            for element in elements:
+                # Get atomic number from the element symbol
+                atomic_number = [key for key, value in atomic_number_to_symbol.items() if value == element][0]
+        
+                if atomic_number in basis_dict['elements']:
+                    element_data = basis_dict['elements'][atomic_number]
+                    element_basis_data[element] = element_data
+                else:
+                    print(f"Basis set not found for element: {element}")
+            
+            print("element_basis_data",element_basis_data) 
+            return element_basis_data
+        
+        def convert_to_generalized_shell(self):
+            generalized_shells = []
+        
+            # Get atomic numbers and their coordinates
+            elem_ids = self.mol.elem_ids_to_numpy()
+        
+            atomic_number_to_symbol = {
+                '1': 'H', '2': 'He', '3': 'Li', '4': 'Be', '5': 'B', '6': 'C', '7': 'N', '8': 'O',
+                '9': 'F', '10': 'Ne', '11': 'Na', '12': 'Mg', '13': 'Al', '14': 'Si', '15': 'P', '16': 'S',
+                '17': 'Cl', '18': 'Ar', '19': 'K', '20': 'Ca', '21': 'Sc', '22': 'Ti', '23': 'V', '24': 'Cr',
+                '25': 'Mn', '26': 'Fe', '27': 'Co', '28': 'Ni', '29': 'Cu', '30': 'Zn', '31': 'Ga', '32': 'Ge',
+                '33': 'As', '34': 'Se', '35': 'Br', '36': 'Kr'
+            }
+        
+            for atom_index, (atomic_number, coord) in enumerate(zip(elem_ids, self.atomic_coords)):
+                element_symbol = atomic_number_to_symbol[str(atomic_number)]
+        
+                if element_symbol not in self.element_basis_data:
+                    print(f"No basis data found for element {element_symbol}, skipping atom {atom_index}...")
+                    continue
+        
+                # Retrieve the basis set for this atom's element
+                element_basis = self.element_basis_data[element_symbol]
+        
+                for shell_data in element_basis['electron_shells']:
+                    # Handle multiple angular momenta per shell
+                    for l_ang, coeff_list in zip(shell_data['angular_momentum'], shell_data['coefficients']):
+                        exponents = np.array([float(exp) for exp in shell_data['exponents']], dtype=float)
+                        coefficients = np.array([float(coeff) for coeff in coeff_list], dtype=float)
+        
+                        print(f"Processing atom {atom_index}: {element_symbol} at {coord}")
+                        print(f"Angular Momentum: {l_ang}")
+                        print("Exponents:", exponents)
+                        print("Coefficients:", coefficients)
+        
+                        coord_type = 'cartesian'  # Adjust as needed
+        
+                        # Create and store the shell for this atom
+                        converted_shell = GeneralizedContractionShell(l_ang, coord, coefficients, exponents, coord_type)
+                        generalized_shells.append(converted_shell)
+        
+            return generalized_shells
 
         def assert_grid(self, grid):
             if grid == 'spherical':
                 points = self.spherical_points
+                print("points_shape",points.shape)
             elif grid == 'rectangular':
                 assert self.rectangular_grid is not None, "Rectangular Grid must be defined first"
                 points = self.rectangular_grid
+                print("points_shape",points.shape)
+
             else:
                 raise ValueError("Specify either spherical or rectangular grid")
 
@@ -135,160 +245,92 @@ if has_veloxchem:
 
         def density(self, Da, Db=None, grid='spherical'):
             """
-            Computes the density on the grid.
-        
+            Computes density on grid. 
+
             Parameters
             ----------
-            Da : np.ndarray
-                Density matrix in AO basis for alpha electrons.
-            Db : np.ndarray, optional
-                Density matrix in AO basis for beta electrons (only used if provided).
-            grid : str, optional
-                Type of grid to use. Default is 'spherical'. If 'rectangular' is chosen,
-                `self.rectangular_grid` must be defined.
-        
+
+            density: np.ndarray.
+                Density in AO basis
+
+            grid: str.
+                Type of grid used. Default spherical 
+                If 'rectangular' used self.rectangular_grid != None 
+
             Returns
             -------
-            density_g : np.ndarray
-                Total density on the requested grid (alpha + beta if provided).
+            density_g: np.ndarray
+                Density on the requested grid    
             """
-            n_elec = []
-            # Ensure the grid is valid and fetch the grid points
-            print("Da shape:", Da.shape)
-            print("self_ao", self.to_ao())
-            print("Type of self.to_ao:", type(self.to_ao()))
+            points = self.assert_grid(grid)
 
-            #self.to_ao = np.array(self.to_ao())
-            print("self.to_ao shape:", self.to_ao().shape)
-
-            # determine the density on the grid points
-            G = np.einsum("ab,bg->ag", Da, self.to_ao())
-            n_g = np.einsum("ag,ag->g", self.to_ao(), G)
-            #n_elec.append(np.dot(self.w, n_g))
-            density_a =  n_g         # evaluate_density(Da, self.basis, points)
-            
-            # Initialize total density
-            density_g = density_a
-            
-            # Add beta density if provided
+            density_a = evaluate_density(Da, self.converted, points)
             if Db is not None:
-                G = np.einsum("ab,bg->ag", Db, self.to_ao())
-                n_g = np.einsum("ag,ag->g", self.to_ao(), G)
-                #n_elec.append(np.dot(self.w, n_g))
-                density_b = n_g                     #evaluate_density(Db, self.basis, points)
-                density_g += density_b  # Sum densities instead of concatenating
-            
-            return density_g
-
-        def hartree(self, Da, Db=None, grid='spherical'):
-            """
-            Compute the Hartree integral of the density on the grid points with the interaction term 1/(r - r').
-        
-            Parameters:
-            - Da: np.ndarray, density matrix for alpha electrons in AO basis
-            - Db: np.ndarray, optional, density matrix for beta electrons (only used if provided)
-        
-            Returns:
-            - result: float, the evaluated result of the Hartree integral.
-            """
-        
-            # Step 2: Compute the density on the grid
-            if Db is None:
-                density_grid = self.density(Da)  # Compute density only for alpha
+                density_b = evaluate_density(Db, self.converted, points)
+                density_g = np.concatenate([density_a, density_b])
+                return density_g
             else:
-                density_grid = self.density(Da, Db)  # Compute total density
-        
-            # Step 3: Initialize the result array
-            result = np.zeros(self.spherical_points.shape[0])  # One value per grid point
-        
-            # Step 4: Loop over grid points
-            for i, r in enumerate(self.spherical_points):  # Loop over r
-                for j, r_prime in enumerate(self.spherical_points):  # Loop over r'
-                    if i == j:
-                        continue  # Skip self-interaction (r == r')
-        
-                    # Compute distance |r - r'|
-                    r_diff = r - r_prime
-                    r_dist = np.linalg.norm(r_diff)
-        
-                    # Interaction term 1 / |r - r'|
-                    interaction_term = 1 / r_dist
-        
-                    # Density at r'
-                    density_at_r_prime = density_grid[j]  
-        
-                    # Compute contribution to the integral
-                    result[i] += density_at_r_prime * interaction_term * self.w[j]  # Weighted sum
-        
-            # Step 5: Sum over all grid points
-            total_result = -np.sum(result)  # Applying the final sum and sign convention
-        
-            return total_result
-        '''
+                return density_a
+
+        def hartree(self, density, grid='spherical'):
+            """
+            Computes Hartree Potential on grid. 
+
+            Parameters
+            ----------
+
+            density: np.ndarray.
+                Density in AO basis
+
+            grid: str.
+                Type of grid used. Default spherical 
+                If 'rectangular' used self.rectangular_grid != None 
+
+
+            Returns
+            -------
+
+            hartree_potential: np.ndarray
+                Hartree potential on the requested grid
+            """        
+            points = self.assert_grid(grid)
+
+            hartree_potential = point_charge_integral(self.converted, 
+                                                    points, 
+                                                    -np.ones(points.shape[0]), 
+                                                    transform=None)
+
+            hartree_potential *= density[:, :, None]
+            hartree_potential = np.sum(hartree_potential, axis=(0, 1))
+
+            return hartree_potential
+
         def external(self, grid='spherical'):
             """
-            Computes External Potential on grid.
-        
+            Computes External Potential on grid. 
+
             Parameters
             ----------
             grid: str
-                Type of grid used. Default spherical.
-                If 'rectangular' used, self.rectangular_grid != None
-        
+                Type of grid used. Default spherical 
+                If 'rectangular' used self.rectangular_grid != None
+
             Returns
             -------
             external_potential: np.ndarray
-                External potential on the given grid.
-            """
-            # Generate the grid for the molecule
-        
-        
-            # Compute external potential
-            old_settings = np.seterr(divide="ignore")  # Silence warning for dividing by zero
-            external_potential = np.sum(
-                self.atomic_charges[None, :] / np.linalg.norm(self.spherical_points[:, :, None] - self.atomic_coords.T[None, :, :], axis=1),
-                axis=1
-            )
+                External potential on the given grid. 
+            """        
+            points = self.assert_grid(grid)       
+
+            old_settings = np.seterr(divide="ignore")  # silence warning for dividing by zero
+            external_potential = self.atomic_charges[None, :] \
+            / (np.sum((points[:, :, None] - self.atomic_coords.T[None, :, :]) ** 2, axis=1) ** 0.5)
             np.seterr(**old_settings)
-        
+
+            if external_potential.ndim > 1:
+                external_potential = np.sum(external_potential, axis=1)
+
             return -external_potential
-        '''
-        def external(self, grid='spherical', threshold_dist=0.0):
-            """
-            Computes External Potential on grid, with the option to zero out potentials
-            for elements that are too close to the nucleus based on a threshold distance.
-        
-            Parameters
-            ----------
-            grid: str
-                Type of grid used. Default spherical.
-                If 'rectangular' used, self.rectangular_grid != None
-            threshold_dist: float or list, optional
-                Threshold distance to zero out potentials for elements too close to the nucleus.
-                If not provided, no zeroing occurs.
-        
-            Returns
-            -------
-            external_potential: np.ndarray
-                External potential on the given grid.
-            """
-            # Generate the grid for the molecule
-        
-            # Compute external potential
-            old_settings = np.seterr(divide="ignore")  # Silence warning for dividing by zero
-            external_potential = (self.atomic_charges[None, :] / np.sum((np.linalg.norm(self.spherical_points[:, :, None] - self.atomic_coords.T[None, :, :])**2))**0.5)
-            
-            # Zero out potentials of elements that are too close to the nucleus
-            external_potential[external_potential > 1.0 / np.array(threshold_dist)] = 0 
-            # Restore old settings
-            np.seterr(**old_settings)
-            external_potential = -np.sum(external_potential, axis=1)
-
-            # Sum over potentials for each dimension (if necessary)
-            #external_potential = -np.sum(external_potential)
-        
-            return external_potential[0]
-
 
         def to_grid(self, f_nm, grid='spherical'):
             """
@@ -312,18 +354,17 @@ if has_veloxchem:
             points = self.assert_grid(grid)
 
             if self.pbs is None:
-                basis = self.basis
-            else:
-                basis = self.pbs
-
+                basis = self.converted
+      
             phis = evaluate_basis(basis, points)
+            print("phis",phis)
             f_g = f_nm.dot(phis)
             if f_nm.ndim == 2:
                 f_g *= phis
 
             return f_g
 
-        def to_ao(self, grid='spherical'):
+        def to_ao(self, f_g, grid='spherical'):
             """
             Expresses grid quantity on the AO basis
 
@@ -339,16 +380,14 @@ if has_veloxchem:
             f_nm: np.ndarray
                 f_g in ao basis
             """
-            xc_drv = vlx.XCIntegrator()
-            chi_g = np.array(xc_drv.compute_gto_values(self.mol, self.basis, self.molgrid))
-            '''
+
             points = self.assert_grid(grid)
 
-            phis = evaluate_basis(self.basis, points)
+            phis = evaluate_basis(self.converted, points)
             f_nm = contract( 'pb, p,p,pa->ab', phis.T, f_g, self.w, phis.T )
             f_nm = 0.5 * (f_nm + f_nm.T)
-            '''
-            return chi_g
+
+            return f_nm
         
         def orbitals(self, C, grid='spherical'):
             """
@@ -369,7 +408,7 @@ if has_veloxchem:
 
             points = self.assert_grid(grid)
 
-            phis = evaluate_basis(self.basis, points)
+            phis = evaluate_basis(self.converted, points)
             mat_g = C.T.dot(phis)
             return mat_g
 
@@ -392,7 +431,7 @@ if has_veloxchem:
 
             points = self.assert_grid(grid)
 
-            lap_density = evaluate_density_laplacian( density, self.basis, points )
+            lap_density = evaluate_density_laplacian( density, self.converted, points )
             return lap_density
     
         def gradient_density(self, density, grid='spherical'):        
@@ -414,7 +453,7 @@ if has_veloxchem:
 
             points = self.assert_grid(grid)
 
-            grad_density = evaluate_density_gradient(density, self.basis, points)
+            grad_density = evaluate_density_gradient(density, self.converted, points)
             return grad_density
             
         def ao_deriv(self, derivs=[0,0,0], transform=None, grid='spherical'):
@@ -445,11 +484,149 @@ if has_veloxchem:
 
             points = self.assert_grid(grid)
 
-            orbs_deriv = evaluate_deriv_basis( self.basis, points, np.array(derivs), 
+            orbs_deriv = evaluate_deriv_basis( self.converted, points, np.array(derivs), 
                                             transform=transform )
 
             return orbs_deriv
 
+        # Specialized for methods. 
+        # def posdef_kinetic_energy_density(self, density, grid='spherical'):
+        #     """
+        #     Please look at OuCarter or mRKS method
+        #     Evaluates the positive-definite kinetic energy density on grid
+        #     t = 1/2 \nabla \cdot \nabla \gamma(r,r') 
+        #     """
+
+        #     points = self.assert_grid(grid)
+        #     t = evaluate_posdef_kinetic_energy_density(density, self.basis, points)
+
+        #     return t
+
+        # def kinetic_energy_density(self, density, alpha=-1/4, grid='spherical'):
+        #     """
+        #     Please look at OuCarter or mRKS method
+        #     Evaluates the general form of the kinetic energy density
+        #     t = 1/2 \nabla \cdot \nabla \gamma(r,r') + alpha \nabla^2 n(r)
+        #     """
+
+        #     points = self.assert_grid(grid)
+        #     t = evaluate_general_kinetic_energy_density(density, self.basis, points, alpha=alpha)
+
+        #     return t
+
+        # def kinetic_energy_density_pauli(self, C, grid='spherical', method='grid'):
+        #     """
+        #     Please look at OuCarter or mRKS method
+        #     Obtains kinetic energy density in terms of the Pauli kinetic energy density
+            
+        #     Parameters
+        #     ----------
+        #     C: np.ndarray
+        #         Occupied Molecular Orbitals
+        #     """
+
+        #     points = self.assert_grid(grid)
+
+        #     density = C @ C.T
+        #     density_g = self.density(density, grid=grid)
+
+        #     basis_dx = self.ao_deriv(derivs=[1,0,0], transform=None, grid=grid)
+        #     basis_dy = self.ao_deriv(derivs=[0,1,0], transform=None, grid=grid)
+        #     basis_dz = self.ao_deriv(derivs=[0,0,1], transform=None, grid=grid)
+
+        #     if method == 'grid':
+        #         orbs = self.orbitals(C, grid=grid)
+        #         d_orbs = ((basis_dx + basis_dy + basis_dz).T @ C).T
+        #         tau_p = np.zeros_like( density_g )
+        #         for i in range(C.shape[1]):
+        #             for j in range(C.shape[1]):
+        #                 if i == j:
+        #                     pass
+        #                 else:
+        #                     tau_p += np.abs( orbs[i,:] * (d_orbs[j,:]) - orbs[j,:] * (d_orbs[i,:]) )**2
+
+        #     elif method == 'basis':
+        #         basis = self.ao_deriv(grid=grid)
+        #         dx = contract('pm,mi,nj,pn->ijp', basis.T, C, C, basis_dx.T)
+        #         dy = contract('pm,mi,nj,pn->ijp', basis.T, C, C, basis_dy.T)
+        #         dz = contract('pm,mi,nj,pn->ijp', basis.T, C, C, basis_dz.T)
+            
+        #         dx = (dx - np.transpose(dx, (1, 0, 2))) ** 2
+        #         dy = (dy - np.transpose(dy, (1, 0, 2))) ** 2
+        #         dz = (dz - np.transpose(dz, (1, 0, 2))) ** 2
+
+        #         occ = np.ones(C.shape[1])
+        #         occ_matrix = np.expand_dims(occ, axis=0) @ np.expand_dims(occ, axis=1)
+
+        #         tau_p = np.sum((dx + dy + dz).T * occ_matrix, axis=(1,2)) 
+
+
+        #     tau_p /= (2*density_g)
+
+        #     return tau_p
+
+        # def avg_local_orb_energy(self, density, orbitals, eigvals, grid='spherical'):
+        #     """
+        #     Please look at OuCarter or mRKS method
+        #     Generates average local orbital energy. Described by Staroverov
+        #     J. Chem. Phys. 146, 084103. [Equations 4 and/or 6]
+        #     $$
+        #     e_tilde = 1/n(r) * [ \sum_i \varepsilon_i * | \phi_i(r) |^2 ]
+        #     $$
+        #     """
+
+        #     points = self.assert_grid(grid)
+
+        #     phis      = evaluate_basis(self.basis, points)
+        #     density_g = self.density(density=density, grid=grid)
+        #     e_tilde   = contract('xp, xo, xo, x, xp-> p', phis, 
+        #                                                 orbitals, orbitals, eigvals, 
+        #                                                 phis) / density_g
+
+        #     return e_tilde
+
+        # def external_tilde(self, grid='spherical', method='grid'):
+        #     """
+        #     Please look at OuCarter or mRKS method
+        #     Generates effective external potential from LDA exchange. Described by Ou + Carter. 
+        #     J. Chem. Theory Comput. 2018, 14, 11, 5680–5689
+
+        #     $$
+        #     v^{~}{ext}(r) = \epsilon^{-LDA}(r) - \frac{\tau^{LDA}{L}}{n^{LDA}(r)}
+        #     - v_{H}^{LDA}(r) - v_{xc}^{LDA}(r)
+        #     $$
+        #     (22) in [1].
+        #     """
+
+        #     points = self.assert_grid(grid)
+
+        #     # LDA results
+        #     Da0, Db0 = self.mf.make_rdm1()
+        #     Ca0, Cb0 = self.mf.mo_coeff
+        #     ea0, eb0 = self.mf.mo_energy
+
+        #     da0_g = self.density(Da0, grid)
+        #     db0_g = self.density(Db0, grid)
+
+        #     # LDA exchange
+        #     cx = -(3/np.pi)**(1/3)
+        #     vxca = cx * da0_g ** (1/3)
+        #     vxcb = cx * db0_g ** (1/3)
+
+        #     # External tilde
+        #     e_tilde = self.avg_local_orb_energy(Da0, Ca0, ea0, grid=grid)
+        #     lap     = self.laplacian_density(Da0, grid=grid)
+        #     grad    = self.gradient_density(Da0, grid=grid)
+        #     grad    = grad[:,0] + grad[:,1] + grad[:,2]
+        #     hartree = self.hartree(Da0, grid=grid)
+            
+        #     tau_l  = self.kinetic_energy_density_pauli(Ca0, grid=grid, method=method)
+        #     tau_l += - 0.25 * lap + np.abs( grad )**2 / (8*da0_g) 
+        
+        #     external_tilde = e_tilde - tau_l/da0_g - hartree - vxca
+
+        #     return external_tilde
+        
         # Specialized for methods. 
         # def posdef_kinetic_energy_density(self, density, grid='spherical'):
         #     """
