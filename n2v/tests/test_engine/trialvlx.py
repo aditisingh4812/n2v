@@ -2,11 +2,11 @@ import numpy as np
 import n2v
 import veloxchem as vlx
 import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D
 
-molecule_data = """2
+molecule_data = """1
 
-C        0.00000000    0.00000000   -0.71500000
-O        0.00000000    0.00000000    0.71500000
+He        0.00000000    0.00000000    0.00000
 """
 
 # Instead of passing a Molecule object, you pass the molecule_data string
@@ -15,17 +15,22 @@ print(dir(molecule))
 # Now you can set the system
 basis = 'sto-3g'
 basis1 = vlx.MolecularBasis.read(molecule, basis, ostream=None)
+print("basis1_dir",basis1)
 ao_basis_map = basis1.get_ao_basis_map(molecule)
 print("ao_basis_map",ao_basis_map)
-label = basis1.get_label()
+label = basis1.get_avail_basis()
 print("Basis set label:", label)
 
 #nbf = basis1.get_dimension_of_basis(molecule)
 #print("nbf",nbf)
 ref =1
 scf_drv = vlx.ScfRestrictedDriver()
-
-scf_result = scf_drv.compute(molecule, basis1)
+scf_drv.xcfun = "slater"
+grid_drv = vlx.veloxchemlib.GridDriver()
+grid_level =1
+grid_drv.set_level(grid_level)
+molgrid = grid_drv.generate(molecule)
+scf_results = scf_drv.compute(molecule, basis1)
 inv = n2v.Inverter(engine='veloxchem')
 print("dir(molecule)")
 # Assuming molecule.get_charge() provides a list of charges for each atom
@@ -39,154 +44,101 @@ for element in atomic_composition:
     atomic_charges = np.append(atomic_charges,element)
 
 print(atomic_charges)
+print(atomic_charges.shape)
 # Assuming that you want to get the coordinates for all atoms
 atomic_coords = np.array([molecule.get_atom_coordinates(i) for i in range(molecule.number_of_atoms())])
 print(f"atomic_coords shape: {atomic_coords.shape}")
+print("atomic_coords",atomic_coords)
 
-# **Call from_scf() to initialize densities and orbitals properly**
-inv.set_system(molecule_data, basis, ref=ref)
-inv.Dt = [scf_result['D_alpha'], scf_result['D_alpha']]  # Density matrices for alpha and beta
-print("inv_Dt",inv.Dt)
+
+inv.set_system(molecule_data, basis, ref=ref,scf_results=scf_results)
+
+inv.Dt = [scf_results['D_alpha'], scf_results['D_alpha']]  # Density matrices for alpha and beta
+#print("inv_Dt",inv.Dt)
 
 #print("invers_dt_shape",np.array(inv.Dt).shape)
-inv.ct = [scf_result['C_alpha'], scf_result['C_beta']]  # Coefficients for alpha and beta
-inv.et = [scf_result['E_alpha'], scf_result['E_beta']]  # Eigenvalues for alpha and beta
+inv.ct = [scf_results['C_alpha'], scf_results['C_beta']]  # Coefficients for alpha and beta
+inv.et = [scf_results['E_alpha'], scf_results['E_beta']]  # Eigenvalues for alpha and beta
 
-inv.from_scf(scf_result,molecule_data,basis)
+inv.from_scf(molecule_data,basis,scf_results=scf_results)
 # Now, you can proceed with inversion
+#inv.invert("wuyang", opt_max_iter=1000, opt_method="L-BFGS-B", reg=1e-5, gtol=1e-6, guide_components="fermi_amaldi")
 inv.invert("wuyang", opt_max_iter=1000, opt_method="trust-exact", reg=0, gtol=1e-6, guide_components="fermi_amaldi")
 inv.Dt = np.array(inv.Dt, dtype =float)
 grid_drv = vlx.GridDriver()
-molgrid = grid_drv.generate(molecule)  # Generate grid for the molecule
-print(dir(molgrid))
 # Step 2: Access grid points and weights
 x_coords = molgrid.x_to_numpy()  # Get x coordinates as a NumPy array
-y_coords = molgrid.y_to_numpy()  # Get y coordinates as a NumPy array
+np.save("x_coords",x_coords)
+y_coords = molgrid.y_to_numpy()
+np.save("y_coords",y_coords)# Get y coordinates as a NumPy array
 z_coords = molgrid.z_to_numpy()  # Get z coordinates as a NumPy array
-
+np.save("z_coords",z_coords)
+coords = np.vstack((x_coords, y_coords, z_coords)).T  # Combine into a single array of coordinates
+print("coords",coords)
+np.save("all",coords)
 # Combine the coordinates into a single array of points (spherical grid)
 spherical_points = np.vstack((x_coords, y_coords, z_coords)).T  # Shape: (num_points, 3)
 # Access the weights for integration
 w = molgrid.w_to_numpy()  # Weights associated with the grid points
+np.save("w",w)
+xc_drv = vlx.XCIntegrator()
+
+#n_grid_points = []
+#n_elec = []
+# generate grid points and weights for molecule
+#weights = molgrid.w_to_numpy()
+#n_grid_points.append(molgrid.number_of_points())
+
+# generate AOs on the grid points
+chi_g = xc_drv.compute_gto_values(molecule, basis1, molgrid)
+
+print("chi_g",chi_g)
 
 
-# Set the inverter data
-inv.Dt = [scf_result['D_alpha'], scf_result['D_beta']]  # Density matrices for alpha and beta
-print("inv.Dt",inv.Dt)
-inv.ct = [scf_result['C_alpha'], scf_result['C_beta']]  # Coefficients for alpha and beta
-inv.et = [scf_result['E_alpha'], scf_result['E_beta']]  # Eigenvalues for alpha and beta
-# 3. Assign grid to VeloxchemGrider
-inv.eng.grid.spherical_grid = spherical_points
-#total_density = inv.Dt[0] + inv.Dt[1]
-#inv.invert('mRKS', vxc_grid=grid, opt_max_iter=30, frac_old=0.8, init='scan')
-#print("Total density shape:", total_density.shape)  # Should be (nbf, nbf)
-print("Grid points shape:", inv.eng.grid.spherical_grid.shape)  # Should be (N, 3)
-# Evaluate density at grid points
-density = inv.eng.grid.density(scf_result['D_alpha'], scf_result['D_beta'],grid='spherical')
-print("density", density)
+#np.testing.assert_allclose(D_ao, D, atol=1e-12)
+density = inv.eng.grid.density(scf_results['D_alpha'], scf_results['D_beta'],grid='spherical')
 vext = inv.eng.grid.external( grid='spherical') 
-print("vext",vext)
-#vH = inv.eng.grid.hartree(density=total_density, grid='spherical')  # Specify grid type
 
-vH = inv.eng.grid.hartree(Da=scf_result['D_alpha'])
-exit()
-#inv.from_scf(scf_result)
-# Now, pass scf_results to set_system
-#inv.set_system(molecule_data, basis, ref=ref, pbs='same')
-
-
-grid_drv = vlx.GridDriver()
-molgrid = grid_drv.generate(molecule)  # Generate grid for the molecule
-print(dir(molgrid))
-# Step 2: Access grid points and weights
-x_coords = molgrid.x_to_numpy()  # Get x coordinates as a NumPy array
-y_coords = molgrid.y_to_numpy()  # Get y coordinates as a NumPy array
-z_coords = molgrid.z_to_numpy()  # Get z coordinates as a NumPy array
-
-# Combine the coordinates into a single array of points (spherical grid)
-spherical_points = np.vstack((x_coords, y_coords, z_coords)).T  # Shape: (num_points, 3)
-# Access the weights for integration
-w = molgrid.w_to_numpy()  # Weights associated with the grid points
-
-
-
-# Set the inverter data
-inv.Dt = [scf_result['D_alpha'], scf_result['D_beta']]  # Density matrices for alpha and beta
-print("inv.Dt",inv.Dt)
-inv.ct = [scf_result['C_alpha'], scf_result['C_beta']]  # Coefficients for alpha and beta
-inv.et = [scf_result['E_alpha'], scf_result['E_beta']]  # Eigenvalues for alpha and beta
-
-print(dir(n2v.grid.veloxchemgrider))
-# Generate one dimensional grid
-x = np.linspace(-5,5,100)
-y = [0]
-z = [0]
-grid, shape = n2v.veloxchemgrider.generate_grids(x,y,z)
-
-da_g = inv.on_grid_density(inv.Dt,grid=spherical_points)
-# Build Grid
-#inv.eng.grid.build_rectangular((5001,1,1))
-#x = inv.eng.grid.x
-#print("x",x)
-exit()
-#Compute components
-vH = inv.eng.grid.hartree(density=inv.Dt, grid='rectangular')
+vH = inv.eng.grid.hartree(density=scf_results['D_alpha'])
+print("vH",vH)
 vFA = (1 - 1/(inv.nalpha + inv.nbeta)) * vH
-vrest = inv.eng.grid.to_grid(inv.v_pbs, grid='rectangular')
+print("vFA",vFA)
+print("inv.v_pbs",inv.v_pbs)
+vrest = inv.eng.grid.to_grid(inv.v_pbs, grid='spherical')
+print("vrest",vrest)
 
-# Step 4: Compute the Hartree potential using the spherical grid
-#vH1 = inv.eng.grid.hartree(inv.Dt,molgrid)
+vxc = vFA + vrest - vH
+print("vxc",vxc)
+np.save("vxc",vxc)
+'''
+print("x_coords shape:", x_coords.shape)
+print("y_coords shape:", y_coords.shape)
+print("z_coords shape:", z_coords.shape)
+print("vxc shape:", vxc.shape)
+'''
+# Load the coordinates
+x_coords = np.load("x_coords.npy")
+y_coords = np.load("y_coords.npy")
+z_coords = np.load("z_coords.npy")
+vxc = np.load("vxc.npy")  # Assuming you've stored vxc values
 
-exit()
-# Step 5: Compute the Fermi-Amaldi potential using the Hartree potential
-vFA1 = (1 - 1 / (inv.nalpha + inv.nbeta)) * vH1
+# Create 3D scatter plot
+fig = plt.figure(figsize=(8, 6))
+ax = fig.add_subplot(111, projection='3d')
 
+# Scatter plot with color mapping
+sc = ax.scatter(x_coords, y_coords, z_coords, c=vxc, cmap="viridis", marker="o")
 
-# Compute the rest potential
-vrest1 = inv.eng.grid.ao(inv.v_pbs, grid=grid, basis=inv.eng.pbs)
+# Colorbar for potential values
+plt.colorbar(sc, ax=ax, label=r'$v_{xc}$')
 
-# Compute the exchange-correlation potential
-vxc1 = vFA1 + vrest1 - vH1
+# Labels and title
+ax.set_xlabel("X")
+ax.set_ylabel("Y")
+ax.set_zlabel("Z")
+ax.set_title("Exchange-Correlation Potential $v_{xc}$ on Spherical Grid")
+# Save as PNG
+plt.savefig("vxc_plot.png", dpi=300, bbox_inches='tight')
 
-# Save results to disk (optional)
-np.save("dm.npy", da)
-np.save("coeff.npy", ca)
-np.save("eigen.npy", ea)
-
-exit()
-# Write the results to a file
-with open('file.txt', 'w') as f:
-    s = 0
-    for x_value in x:
-        y = round(x_value, 6)
-        f.write(f"{y}\t\t\t{vxc1[s]}\n")
-        s += 1
-
-# Inversion for new data (adjust the density matrix, coefficients, etc.)
-da1 = da + 1e-7 * np.eye(da.shape[0])  # Adjust density matrix
-new_da_matrix = vlx.core.Matrix.from_array(da1)
-np.save("dm1.npy", new_da_matrix)
-
-# Overwrite the existing wavefunction with the new values
-wfn.Da().copy(new_da_matrix)
-wfn.Ca().copy(vlx.core.Matrix.from_array(ca))
-
-# Perform inversion with updated data
-inv.invert("WuYang", opt_max_iter=100, opt_method="SLSQP", reg=0, gtol=1e-6)
-
-# Compute the new vxc (exchange-correlation) potential using updated data
-vH2 = inv.eng.grid.esp(Da=inv.Dt[0], Db=inv.Dt[1], grid=grid)[1]
-vFA2 = (1 - 1 / (inv.nalpha + inv.nbeta)) * vH2
-vrest2 = inv.eng.grid.ao(inv.v_pbs, grid=grid, basis=inv.eng.pbs)
-
-# Compute the new vxc
-vxc2 = vFA2 + vrest2 - vH2
-vxc_diff = vxc1 - vxc2
-
-# Write the vxc differences to a file
-with open('file.txt', 'a') as f:
-    s = 0
-    for x_value in x:
-        f.write(f"{round(x_value, 6)}\t\t\t{vxc_diff[s]}\n")
-        s += 1
+plt.show()
 

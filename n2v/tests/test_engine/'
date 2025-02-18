@@ -27,7 +27,7 @@ symmetry c1
 BASIS = '6-31g'
 # Set options for the SCF calculation
 psi4.set_options({
-    "reference": "rhf",       # Restricted Hartree-Fock reference
+    "reference": "uhf",       # Restricted Hartree-Fock reference
     "opdm": True,             # One-particle density matrix (OPDM)
     #"SCF_TYPE": "DF",         # Density Fitting
     "basis" : BASIS,
@@ -51,10 +51,10 @@ print("da",da)
 ea = np.asarray(wfn.epsilon_a())
 print("ea",ea)
 
+
 inv = n2v.Inverter.from_wfn(wfn, pbs=BASIS)
 print("here is the old one")
 pyscf_inv = n2v.Inverter(engine='psi4')
-'''
 print("success")
 epsilon = 5e-7
 delta_rho = epsilon * np.eye(da.shape[0])
@@ -77,7 +77,7 @@ np.save("eigen.npy",new_ea_vector)
 wfn.Da().copy(new_da_matrix)
 wfn.Ca().copy(new_ca_matrix)
 wfn.epsilon_a().copy(new_ea_vector)
-'''
+
 
 
 
@@ -112,9 +112,9 @@ print("inv.v_pbs",inv.v_pbs)                                                    
 print("done")    
 # Compute vxc according to the previous equation. 
 vxc1 = vFA1 + vrest1 - vH1
-print("vxc1_shape",vxc1.shape)
 print("vxc1",vxc1)
-
+integrated_vxc = np.sum(vxc1 * weights)
+print("integrated_vxc",integrated_vxc)
 ########################################################################################################
 exit()
 
