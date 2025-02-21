@@ -19,7 +19,7 @@ psi4.core.set_output_file("out.dat", True)
 f=open('file.txt','w')
 # Define the nitrogen molecule and custom basis set directly within the geometry block
 Ne = psi4.geometry("""
-Be 0 0 0
+Ar 0 0 0
 noreorient
 nocom
 symmetry c1
@@ -29,7 +29,7 @@ BASIS = '6-31g'
 psi4.set_options({
     "reference": "rhf",       # Restricted Hartree-Fock reference
     "opdm": True,             # One-particle density matrix (OPDM)
-    #"SCF_TYPE": "DF",         # Density Fitting
+    "SCF_TYPE": "DF",         # Density Fitting
     "basis" : BASIS,
 #    "CC_TYPE": "DF",          # Coupled Cluster with Density Fitting
 #    "tpdm": True,             # Two-particle density matrix (TPDM)
@@ -83,19 +83,23 @@ wfn.epsilon_a().copy(new_ea_vector)
 
 
 #inv.invert("mrks",init=None,opt_max_iter=200 )
-inv.invert("WuYang", opt_max_iter=100, opt_method="SLSQP", reg = 0 ,  gtol=1e-6,
+inv.invert("WuYang", opt_max_iter=100, opt_method="trust-exact", reg = 0 ,  gtol=1e-6,
            guide_components="fermi_amaldi")
 
 # Load the coordinates
 x = np.load("x_coords.npy")
 y = np.load("y_coords.npy")
 z= np.load("z_coords.npy")
-weights = np.load("w.npy")
-#x = np.linspace(-5,5,43)
-#y = np.zeros_like(x)
-#z = np.zeros_like(x)
-grid = np.array([x,y,z])
+grid = np.load("all.npy").T
+#weights = np.load("w.npy")
+# Define positions as a 3D grid
+#z = np.linspace(-5, 5, 20)
+#y = np.zeros_like(z)
+#x = np.zeros_like(z)
 
+#grid = np.vstack((x, y, z)).T
+#grid = np.array([x,y,z])
+print("grid",grid)
 # Additionaly, one can use the generate grid function. 
 #grid2 = inv.eng.grid.generate_grid(x=x, y=[0], z=[0])[0]
 
@@ -105,10 +109,14 @@ print("ext_nuclear",ext)
 # Build Grid
 
 vH1 = inv.eng.grid.esp(Da=inv.Dt[0], Db=inv.Dt[1], grid=grid)[1]
+print("vH1",vH1)
+np.save("vh",vH1)
 vFA1 = (1-1/(inv.nalpha + inv.nbeta)) * vH1
 
 vrest1 = inv.eng.grid.ao(inv.v_pbs, grid=grid, basis=inv.eng.pbs)  # Note that specify the basis set 
 print("inv.v_pbs",inv.v_pbs)                                                                  # that vrest is on.
+np.save("vrest1",vrest1)
+print("vrest1",vrest1)
 print("done")    
 # Compute vxc according to the previous equation. 
 vxc1 = vFA1 + vrest1 - vH1

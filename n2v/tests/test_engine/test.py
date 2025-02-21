@@ -1,32 +1,28 @@
-import numpy as np
-import n2v
 import veloxchem as vlx
-import matplotlib.pyplot as plt
+import numpy as np
 
-molecule_data = """2
-
-H    0.000000000000        0.740848095288        0.582094932012
-H    0.000000000000       -0.740848095288        0.582094932012
+mol_string = """
+O   0.0   0.0   0.0
+H   0.0   1.4   1.1
+H   0.0  -1.4   1.1
 """
+basis_label = 'def2-svp'
 
-# Read molecule data into VeloxChem's Molecule object
-molecule = vlx.Molecule.read_xyz_string(molecule_data)
+mol = vlx.Molecule.read_molecule_string(mol_string, units='au')
+bas = vlx.MolecularBasis.read(mol, basis_label)
 
-# Now you can set the system
-basis = 'sto-3g'
-ref = 1
+nbfs = 0
 
-# Compute SCF results using VeloxChem
-scf_drv = vlx.ScfRestrictedDriver()
-scf_drv.ostream.mute()  # Mute output for cleaner logs
-scf_results = scf_drv.compute(molecule, basis)  # This returns the results as a dictionary
+for bf in bas.basis_functions():
+    print(bf.get_angular_momentum())
 
-exit()
-# Initialize the inverter for VeloxChem
-inv = n2v.Inverter(engine='veloxchem')
-# Now, pass scf_results to set_system
-inv.set_system(molecule, basis, ref=ref, pbs='same', scf_results=scf_results)
+    nbfs += bf.get_angular_momentum() * 2 + 1
 
-# Now you can proceed with the inversion or other methods
-inv.invert("WuYang", opt_max_iter=100, opt_method="trust-exact", reg=0, gtol=1e-6, guide_components="fermi_amaldi")
+    exponents = bf.get_exponents()
+    norm_factors = bf.get_normalization_factors()
+
+    for i in range(bf.number_of_primitives()):
+        print('  ', exponents[i], norm_factors[i])
+
+print('nbfs=', nbfs)
 

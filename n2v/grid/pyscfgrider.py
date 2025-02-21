@@ -61,7 +61,69 @@ if has_pyscf:
             # self.w                = grid.weights
 
             # Build rectangular grid
+
+
             self.rectangular_grid   = None
+
+
+        def get_basis_set_for_elements(self, elements):
+            atomic_number_to_symbol = {
+                '1': 'H', '2': 'He', '3': 'Li', '4': 'Be', '5': 'B', '6': 'C', '7': 'N', '8': 'O',
+                '9': 'F', '10': 'Ne', '11': 'Na', '12': 'Mg', '13': 'Al', '14': 'Si', '15': 'P', '16': 'S',
+                '17': 'Cl', '18': 'Ar', '19': 'K', '20': 'Ca', '21': 'Sc', '22': 'Ti', '23': 'V', '24': 'Cr',
+                '25': 'Mn', '26': 'Fe', '27': 'Co', '28': 'Ni', '29': 'Cu', '30': 'Zn', '31': 'Ga', '32': 'Ge',
+                '33': 'As', '34': 'Se', '35': 'Br', '36': 'Kr'
+            }
+
+            basis_data = bse.get_basis(self.basis, fmt='json')
+            basis_dict = json.loads(basis_data)
+
+            # Print available elements in the basis set
+            print(f"Available elements in {basis_name}:")
+            print(basis_dict['elements'].keys())
+
+            element_basis_data = {}
+
+            for element in elements:
+                # Get atomic number from the element symbol
+                atomic_number = [key for key, value in atomic_number_to_symbol.items() if value == element][0]
+                print("atomic_number",atomic_number)
+                if atomic_number in basis_dict['elements']:
+                    element_data = basis_dict['elements'][atomic_number]
+                    element_basis_data[element] = element_data
+                else:
+                    print(f"Basis set not found for element: {element}")
+
+            print("element_basis_data",element_basis_data)
+            return element_basis_data
+
+
+        def convert_to_generalized_shell(self):
+            generalized_shells = []
+            # Get atomic numbers and their coordinates
+            elem_ids = self.mol.elem_ids_to_numpy()
+            print("self.extract_basis_data",self.extract_basis_data)
+            for atom_index, (atomic_number, coord) in enumerate(zip(elem_ids, self.atomic_coords)):
+                element_symbol = self.atomic_number_to_symbol[str(atomic_number)]
+                print("element_symbol",element_symbol)
+                element_basis = self.extract_basis_data  # Since it's already the correct data
+
+                for shell_data in element_basis:
+                     l_ang = shell_data['angular_momentum']
+                     exponents = np.array(shell_data['exponents'], dtype=float)
+                     coefficients = np.array(shell_data['coefficients'], dtype=float)
+
+                     print(f"Processing atom {atom_index}: {element_symbol} at {self.atomic_coords}")
+                     print(f"Angular Momentum: {l_ang}")
+                     print("Exponents:", exponents)
+                     print("Coefficients:", coefficients)
+
+                     coord_type = 'cartesian'  # Adjust as needed
+                     converted_shell = GeneralizedContractionShell(l_ang, coord, coefficients, exponents, coord_type)
+                     generalized_shells.append(converted_shell)
+
+            return generalized_shells
+
 
         def assert_grid(self, grid):
             if grid == 'spherical':

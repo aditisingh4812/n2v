@@ -1,42 +1,37 @@
+#!/usr/bin/env python
+import numpy
 import numpy as np
-import veloxchem as vlx
+from pyscf import gto
+from pyscf.dft import numint
 
-# Corrected multi-line string format
-h2o_xyz = """1
+'''
+Evaluate AO functions on given grid coordinates.
 
-Ne        0.00000000    0.00000000    0.00000
-"""
+See also
+pyscf/examples/gto/24-ao_value_on_grid.py
+pyscf/examples/pbc/30-ao_value_on_grid.py
+'''
 
-# Define molecule and basis set
-molecule = vlx.Molecule.read_xyz_string(h2o_xyz)  # Corrected method call
-basis = vlx.MolecularBasis.read(molecule, "sto-3g")
+mol = gto.M(
+    verbose = 0,
+    atom = '''
+    Ne    0    0.       0. ''',
+    basis = '6-31g')
 
-# Run SCF calculation
-scf_drv = vlx.ScfRestrictedDriver()
-scf_drv.ostream.mute()
-scf_results = scf_drv.compute(molecule, basis)
+# Uniform grids
+coords = []
+for ix in numpy.arange(-10, 10, 1.):
+    for iy in numpy.arange(-10, 10, 1.):
+        for iz in numpy.arange(-10, 10, 1.):
+            coords.append((ix,iy,iz))
 
-# Compute total density matrix
-D = scf_results["D_alpha"] + scf_results["D_beta"]
+coords = np.load("all.npy")#numpy.array(coords)
 
-# Load positions from file
-positions = np.load('all.npy')  # Ensure the file exists
-print("positions:", positions)
-weights = np.load('w.npy')
-# Define charges
-charges = -1.0 * np.ones(len(positions))
-print("charges:", charges)
-
-# Compute nuclear potential integrals
-pot_drv = vlx.NuclearPotentialIntegralsDriver()
-v_c = {}
-
-for charge, position in zip(charges, positions):
-    position_tuple = tuple(position)  # Convert to tuple for dictionary key
-    v_np = -1.0 * pot_drv.compute(molecule, basis, [charge], [position]).to_numpy()
-    v_c[position_tuple] = np.einsum("ab, ab ->", D, v_np)
-    
-# Print results
-for position, value in v_c.items():
-    print( value)
+# AO value
+ao_value = numint.eval_ao(mol, coords)
+print('13 basis, 8000 xyz  %s' % str(ao_value.shape))
+print("ao_value",ao_value)
+# AO value and its gradients
+ao_value = numint.eval_ao(mol, coords, deriv=1)
+print('13 basis, 8000 xyz  %s' % str(ao_value.shape))
 

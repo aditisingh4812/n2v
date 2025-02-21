@@ -36,21 +36,31 @@ if has_veloxchem:
     from gbasis.evals.electrostatic_potential import point_charge_integral
 
     class VeloxchemGrider:
-        def __init__(self, mol, pbs="same", basis_str=None, ref=None, grid_level=1,scf_results=None):
+        def __init__(self, mol, pbs_mol=None, basis_str=None, ref=None, grid_level=1,scf_results=None):
            self.mol = mol
         # Handle user-defined basis set
            self.basis = vlx.MolecularBasis.read(mol, basis_str)
            print("self basis shape",dir(self.basis))
-           if pbs=='same':
-              self.pbs = self.basis 
-           else :
-              self.pbs = vlx.MolecularBasis.read(mol, pbs)
+           self.pbs = vlx.MolecularBasis.read(pbs_mol,basis_str) if pbs_mol else None
            # Define the basis set name you want to use
            self.basis_name = basis_str
            # Extract element IDs
            elem_ids = mol.elem_ids_to_numpy()
            print("elem_ids",elem_ids)
+           self.atomic_number_to_symbol = {
+           '1': 'H', '2': 'He', '3': 'Li', '4': 'Be', '5': 'B', '6': 'C', '7': 'N', '8': 'O',
+           '9': 'F', '10': 'Ne', '11': 'Na', '12': 'Mg', '13': 'Al', '14': 'Si', '15': 'P', '16': 'S',
+           '17': 'Cl', '18': 'Ar', '19': 'K', '20': 'Ca', '21': 'Sc', '22': 'Ti', '23': 'V', '24': 'Cr',
+           '25': 'Mn', '26': 'Fe', '27': 'Co', '28': 'Ni', '29': 'Cu', '30': 'Zn', '31': 'Ga', '32': 'Ge',
+           '33': 'As', '34': 'Se', '35': 'Br', '36': 'Kr'
+            }
            # Map atomic numbers to element symbols
+           unique_elements = list([self.atomic_number_to_symbol[str(atom)] for atom in elem_ids])
+           print("unique_elements",unique_elements)
+           # Extract the basis set from Basis Set Exchange (BSE)
+           #self.basis_exchange = self.get_basis_set_for_elements(unique_elements,basis_str)
+           self.element_basis_data = self.get_basis_set_for_elements(unique_elements,basis_str)
+           #self.extract_basis_data = self.extract_basis_data()
            self.ref = ref
            try:
             #self.atomic_charges = np.array(self.mol.get_charge())
@@ -101,21 +111,190 @@ if has_veloxchem:
            self.Da = self.scf_results['D_alpha']
            if self.ref != 1:
             self.Db = self.scf_results['D_beta']
-           xc_drv = vlx.XCIntegrator()
-           if pbs=='same':
-             phis = xc_drv.compute_gto_values(self.mol, self.basis, self.molgrid)
-             print("phis_shape",phis.shape)
-           else:
-             phis = xc_drv.compute_gto_values(self.mol, self.pbs, self.molgrid)
-             print("phis_shape",phis.shape)
-           self.phis = phis
-           print("phis shape", phis.shape)
+           self.converted = self.convert_to_generalized_shell()
+        # Function to extract basis set details from BSE for a given element
+        
+        def get_basis_set_for_elements(self, elements, basis_name):
+            atomic_number_to_symbol = {
+                '1': 'H', '2': 'He', '3': 'Li', '4': 'Be', '5': 'B', '6': 'C', '7': 'N', '8': 'O',
+                '9': 'F', '10': 'Ne', '11': 'Na', '12': 'Mg', '13': 'Al', '14': 'Si', '15': 'P', '16': 'S',
+                '17': 'Cl', '18': 'Ar', '19': 'K', '20': 'Ca', '21': 'Sc', '22': 'Ti', '23': 'V', '24': 'Cr',
+                '25': 'Mn', '26': 'Fe', '27': 'Co', '28': 'Ni', '29': 'Cu', '30': 'Zn', '31': 'Ga', '32': 'Ge',
+                '33': 'As', '34': 'Se', '35': 'Br', '36': 'Kr'
+            }
+
+            basis_data = bse.get_basis(basis_name, fmt='json')
+            basis_dict = json.loads(basis_data)
+
+            # Print available elements in the basis set
+            print(f"Available elements in {basis_name}:")
+            print(basis_dict['elements'].keys())
+
+            element_basis_data = {}
+
+            for element in elements:
+                # Get atomic number from the element symbol
+                atomic_number = [key for key, value in atomic_number_to_symbol.items() if value == element][0]
+                print("atomic_number",atomic_number)
+                if atomic_number in basis_dict['elements']:
+                    element_data = basis_dict['elements'][atomic_number]
+                    element_basis_data[element] = element_data
+                else:
+                    print(f"Basis set not found for element: {element}")
+
+            print("element_basis_data",element_basis_data)
+            return element_basis_data 
+        '''
+        def get_basis_set_for_elements(self,elements, basis_name):
+            """
+            Extracts a basis set from Basis Set Exchange (BSE) in NWChem format and converts it to VeloxChem format.
+            """
+            atomic_number_to_symbol = {
+                '1': 'H', '2': 'He', '3': 'Li', '4': 'Be', '5': 'B', '6': 'C', '7': 'N', '8': 'O',
+                '9': 'F', '10': 'Ne', '11': 'Na', '12': 'Mg', '13': 'Al', '14': 'Si', '15': 'P', '16': 'S',
+                '17': 'Cl', '18': 'Ar', '19': 'K', '20': 'Ca', '21': 'Sc', '22': 'Ti', '23': 'V', '24': 'Cr',
+                '25': 'Mn', '26': 'Fe', '27': 'Co', '28': 'Ni', '29': 'Cu', '30': 'Zn', '31': 'Ga', '32': 'Ge',
+                '33': 'As', '34': 'Se', '35': 'Br', '36': 'Kr'
+            }
+
+            veloxchem_basis = {}
+            basis_data = bse.get_basis(basis_name, fmt='json')
+            basis_dict = json.loads(basis_data)
+            element_basis_data = {}
+            for element in elements:
+                atomic_number = [key for key, value in self.atomic_number_to_symbol.items() if value == element][0]
+                print("atomic_number",atomic_number)
+                formatted_element = element.capitalize()
+                print("formatted_element",formatted_element)
+                if atomic_number in basis_dict['elements']:
+                    element_data = basis_dict['elements'][atomic_number]
+                    element_basis_data[element] = element_data
+                else:
+                    print(f"Basis set not found for element: {element}")
+                # Retrieve basis set in NWChem format
+                basis_nwchem = bse.get_basis(basis_name, elements=[element], fmt='nwchem')
+                print("basis_nwchem",basis_nwchem)
+                # Convert to VeloxChem format
+                basis_veloxchem = convert_formatted_basis_str(basis_nwchem, 'nwchem', 'veloxchem')
+            print("basis_veloxchem",basis_veloxchem) 
+            return basis_veloxchem
+         
+        def extract_basis_data(self):
+            veloxchem_basis_str = self.element_basis_data
+            print("veloxchem_basis_str",veloxchem_basis_str)
+            # Angular momentum mapping
+            angular_momentum_map = {'S': 0, 'P': 1, 'D': 2, 'F': 3}
+        
+            # Regular expression to match shell headers like "S 1 1", "P 3 1", etc.
+            shell_pattern = re.compile(r"(S|P|D|F)\s+(\d+)\s+\d+")
+        
+            # Find all matches for shell types, number of basis functions, and positions
+            shell_matches = [(match.group(), match.start()) for match in shell_pattern.finditer(veloxchem_basis_str)]
+        
+            # List to preserve order
+            basis_data = []
+        
+            # Iterate through each match and extract data
+            for i, (shell_line, start_pos) in enumerate(shell_matches):
+                shell, num_basis_functions, _ = shell_line.split()
+                angular_momentum = angular_momentum_map[shell]  # Convert shell to angular momentum number
+                num_basis_functions = int(num_basis_functions)
+        
+                print(f"Processing: {shell_line} (l = {angular_momentum}) at position {start_pos}")
+        
+                # Find the next occurrence to determine data end
+                end_pos = shell_matches[i + 1][1] if i + 1 < len(shell_matches) else len(veloxchem_basis_str)
+        
+                # Extract the corresponding data section
+                data_section = veloxchem_basis_str[start_pos:end_pos].strip().split("\n")[1:]  # Skip the header line
+        
+                # Initialize storage for exponents and coefficients
+                exponents = []
+                coefficients = []
+        
+                for line in data_section:
+                    parts = line.split()
+                    if len(parts) < 2:
+                        continue
+        
+                    # Append exponents and coefficients
+                    try:
+                        exponents.append(float(parts[0]))
+                        coefficients.append(float(parts[1]))
+                    except ValueError:
+                        continue  # Skip any non-numerical values
+        
+                # Store in the ordered list
+                basis_data.append({
+                    'angular_momentum': angular_momentum,  # Use the quantum number instead of shell letter
+                    'num_basis_functions': num_basis_functions,
+                    'exponents': exponents,
+                    'coefficients': coefficients
+                })
+            print("basis_data",basis_data)
+            return basis_data
+        
+        def convert_to_generalized_shell(self):
+            generalized_shells = []
+            # Get atomic numbers and their coordinates
+            elem_ids = self.mol.elem_ids_to_numpy()
+            print("self.extract_basis_data",self.extract_basis_data)
+            for atom_index, (atomic_number, coord) in enumerate(zip(elem_ids, self.atomic_coords)):
+                element_symbol = self.atomic_number_to_symbol[str(atomic_number)]
+                print("element_symbol",element_symbol)
+                element_basis = self.extract_basis_data  # Since it's already the correct data
+
+                for shell_data in element_basis:
+                     l_ang = shell_data['angular_momentum']
+                     exponents = np.array(shell_data['exponents'], dtype=float)
+                     coefficients = np.array(shell_data['coefficients'], dtype=float)
+                 
+                     print(f"Processing atom {atom_index}: {element_symbol} at {self.atomic_coords}")
+                     print(f"Angular Momentum: {l_ang}")
+                     print("Exponents:", exponents)
+                     print("Coefficients:", coefficients)
+                 
+                     coord_type = 'cartesian'  # Adjust as needed
+                     converted_shell = GeneralizedContractionShell(l_ang, coord, coefficients, exponents, coord_type)
+                     generalized_shells.append(converted_shell)
+
+            return generalized_shells
+        '''
+        def convert_to_generalized_shell(self):
+            generalized_shells = []
+            # Get atomic numbers and their coordinates
+            elem_ids = self.mol.elem_ids_to_numpy()
+            for atom_index, (atomic_number, coord) in enumerate(zip(elem_ids, self.atomic_coords)):
+                element_symbol = self.atomic_number_to_symbol[str(atomic_number)]
+                print("element_symbol",element_symbol)
+                if element_symbol not in self.element_basis_data:
+                    print(f"No basis data found for element {element_symbol}, skipping atom {atom_index}...")
+                    continue
+                # Retrieve the basis set for this atom's element
+                element_basis = self.element_basis_data[element_symbol]
+                #print("element_basis",element_basis)
+                for shell_data in element_basis['electron_shells']:
+                    # Handle multiple angular momenta per shell
+                    for l_ang, coeff_list in zip(shell_data['angular_momentum'], shell_data['coefficients']):
+                        exponents = np.array([float(exp) for exp in shell_data['exponents']], dtype=float)
+                        coefficients = np.array([float(coeff) for coeff in coeff_list], dtype=float)
+                        print(f"Processing atom {atom_index}: {element_symbol} at {coord}")
+                        print(f"Angular Momentum: {l_ang}")
+                        print("Exponents:", exponents)
+                        print("Coefficients:", coefficients)
+                        coord_type = 'cartesian'  # Adjust as needed
+                        # Create and store the shell for this atom
+                        converted_shell = GeneralizedContractionShell(l_ang, coord, coefficients, exponents, coord_type)
+                        generalized_shells.append(converted_shell)
+            return generalized_shells
         def assert_grid(self, grid):
             if grid == 'spherical':
                 points = self.spherical_points
+                print("points_shape",points.shape)
             elif grid == 'rectangular':
                 assert self.rectangular_grid is not None, "Rectangular Grid must be defined first"
                 points = self.rectangular_grid
+                print("points_shape",points.shape)
 
             else:
                 raise ValueError("Specify either spherical or rectangular grid")
@@ -186,53 +365,46 @@ if has_veloxchem:
                 Density on the requested grid    
             """
             points = self.assert_grid(grid)
-            G = np.einsum("ab,bg->ag", Da, self.phis)
-            n_g = np.einsum("ag,ag->g", self.phis, G)
-            '''
+
             density_a = evaluate_density(Da, self.converted, points)
             if Db is not None:
                 density_b = evaluate_density(Db, self.converted, points)
                 density_g = np.concatenate([density_a, density_b])
                 return density_g
             else:
-            '''
-            return n_g
-          
-
+                return density_a
 
         def hartree(self, density, grid='spherical'):
             """
-            Computes the Hartree potential on a specified grid.
-        
+            Computes Hartree Potential on grid. 
+
             Parameters
             ----------
-            density : np.ndarray
-                Density in AO basis.
-        
-            grid : str, optional
-                Type of grid used. Default is 'spherical'.
-                If 'rectangular' is used, self.rectangular_grid must not be None.
-        
+
+            density: np.ndarray.
+                Density in AO basis
+
+            grid: str.
+                Type of grid used. Default spherical 
+                If 'rectangular' used self.rectangular_grid != None 
+
+
             Returns
             -------
-            hartree_potential : np.ndarray
-                Hartree potential in a matrix format corresponding to the grid points.
-            """
-            positions = self.spherical_points  # Assuming this contains grid point positions
-            # Define nuclear charge array (negative for electron interaction)
-            charges = -np.ones(len(positions))
-            # Compute nuclear potential integrals
-            pot_drv = vlx.NuclearPotentialIntegralsDriver()
-            # Store Hartree potential values in an array matching the grid shape
-            hartree_potential = np.zeros(len(positions))
-            for i, (charge, position) in enumerate(zip(charges, positions)):
-                v_np = -pot_drv.compute(self.mol, self.basis, [charge], [position]).to_numpy()
-                hartree_potential[i] = np.einsum("ab, ab ->", density, v_np) 
-        
-            # Reshape the potential into a structured grid if necessary
-            if hasattr(self, "grid_shape"):  # Ensure `self.grid_shape` exists if needed
-                hartree_potential = hartree_potential.reshape(self.grid_shape)
-        
+
+            hartree_potential: np.ndarray
+                Hartree potential on the requested grid
+            """        
+            points = self.assert_grid(grid)
+
+            hartree_potential = point_charge_integral(self.converted, 
+                                                    points, 
+                                                    -np.ones(points.shape[0]), 
+                                                    transform=None)
+
+            hartree_potential *= density[:, :, None]
+            hartree_potential = np.sum(hartree_potential, axis=(0, 1))
+
             return hartree_potential
 
         def external(self, grid='spherical'):
@@ -280,14 +452,17 @@ if has_veloxchem:
             f_g: np.ndarray
                 Vector/Matrix expressed on the requested grid
             """
+            
             points = self.assert_grid(grid)
-            #if self.pbs is None:
-            #    basis = self.converted
+
+            if self.pbs is None:
+                basis = self.converted
       
-            #phis = evaluate_basis(basis, points)
-            f_g = f_nm.dot(self.phis)
-            #if f_nm.ndim == 2:
-            #   f_g.T *= self.phis
+            phis = evaluate_basis(basis, points)
+            print("phis",phis)
+            f_g = f_nm.dot(phis)
+            if f_nm.ndim == 2:
+                f_g *= phis
 
             return f_g
 

@@ -2,7 +2,6 @@
 Provides interface n2v interface to Veloxchem
 """
 
-
 from .engine import Engine
 import numpy as np
 from opt_einsum import contract
@@ -41,7 +40,10 @@ class VeloxchemEngine(Engine):
         print(f"Basis type before MolecularBasis.read: {type(basis)}")
         # Assign basis sets
         self.basis = veloxchem.MolecularBasis.read(self.mol, basis)
-        self.pbs = veloxchem.MolecularBasis.read(self.mol, basis if pbs == 'same' else pbs)
+        if pbs == 'same':
+          self.pbs = veloxchem.MolecularBasis.read(self.mol, basis)
+        else:
+          self.pbs = veloxchem.MolecularBasis.read(self.mol, pbs)
         # Store reference type
         self.basis_str = basis
         self.pbs_str = basis if pbs == 'same' else pbs
@@ -76,7 +78,6 @@ class VeloxchemEngine(Engine):
         self.nbf   = self.basis.get_dimension_of_basis(self.mol)
         self.npbs  = self.pbs.get_dimension_of_basis(self.mol)
         self.grid = VeloxchemGrider(self.mol, basis_str=self.basis_str, ref= self.ref)
-        print("done")
        def get_T(self):
         """
         Generates Kinetic Operator in AO basis.
@@ -93,7 +94,7 @@ class VeloxchemEngine(Engine):
 
         Returns
         -------
-        T_pbas: np.ndarray. Shape: (nbf, nbf)
+        T_pbas: np.ndarray. Shape: (npbs, npbs)
         """
         print("done-tbas")
         return veloxchem.KineticEnergyIntegralsDriver().compute(self.mol, self.pbs).to_numpy()
@@ -183,14 +184,19 @@ class VeloxchemEngine(Engine):
          4-index overlap matrix. Its shape is (nbf, nbf, nbf, nbf) or
          (  nbf, nbf, nbf, npbs) if a separate potential basis is used.
         """
-        #   - self.grid.weights: a NumPy array of integration weights.
-        grid = self.grid
-        # Evaluate the AO basis functions for the primary basis on the grid.
-        bs1 = self.basis.eval_ao(grid.coords)  # shape: (n_points, nbf)
+        xc_drv = XCIntegrator()
+        bs1 = xc_drv.compute_gto_values(self.mol, self.basis, molgrid)  # Correct AO evaluation
+        bs2 = xc_drv.compute_gto_values(self.mol, self.pbs, molgrid)
+        print(f"Shape of bs1: {bs1.shape}")
+        print(f"Shape of bs2: {bs2.shape}")
+        print(f"Shape of weights: {weights.shape}")
+        # Ensure shapes are correct for contraction
+        bs1 = bs1.T  # Reshape so that bs1 is (num_points, nbf), num_points = 2
+        bs2 = bs2.T  # Reshape bs2 similarly if it's not already
+        weights = weights.reshape(-1)  # Ensure weights is a 1D array (size should be the same as num_points)
+
         auxbasis = self.basis_str + '-jk-fit'
         aux = veloxchem.MolecularBasis.read(self.mol, auxbasis, ostream=None)
-        # Evaluate the auxiliary AO functions on the grid.
-        bs2 = aux.eval_ao(grid.coords)  # shape: (n_points, n_aux)
         S_Pmn = contract('ij, ik, il, i -> jkl', bs2, bs1, bs1, grid.weights)
         S_PQ = aux.get_overlap()  # Expected to return a NumPy array.
         # Compute the pseudo-inverse of the auxiliary overlap matrix.
@@ -199,27 +205,19 @@ class VeloxchemEngine(Engine):
         S4 = contract('Pmn,PQ,Qrs->mnrs', S_Pmn, S_PQinv, S_Pmn)
         print("done-s4")
         return S4
-       # Corrected compute_hartree method
-       def compute_hartree(self, Cocc_a=None, Cocc_b=None):
-        print("stuck")
-        if Cocc_a is None or Cocc_b is None:
-            # Corrected module name from vlx to veloxchem
-            scf_drv = veloxchem.ScfRestrictedDriver() if self.ref == 1 else veloxchem.ScfUnrestrictedDriver()
-            print("crossed")
-            scf_results = scf_drv.compute(self.mol, self.basis)
-            Cocc_a = scf_results['C_alpha'][:, :self.nalpha]
-            Cocc_b = scf_results['C_beta'][:, :self.nbeta] if self.ref == 2 else Cocc_a
+       def compute_hartree(self, Cocc_a, Cocc_b):
         D_a = Cocc_a @ Cocc_a.T
-        D_b = Cocc_b @ Cocc_b.T if self.ref == 2 else D_a
-        D_total = D_a + D_b if self.ref == 2 else 2 * D_a  # For RHF, D_total is 2*D_a
+        D_b = Cocc_b @ Cocc_b.T
+        D_total = D_a + D_b # For RHF, D_total is 2*D_a
         print(self.g.shape)
         print(D_total.shape)
- 
+
         # Corrected contraction for exchange matrix
         J = contract("ijkl,kl->ij", self.g, D_total)
         K = contract("iklj,kl->ij", self.g, D_total)  # Fixed indices
-        print("we are stuck here") 
+        print("J",J)
         return J, K  # Return J and K separately for flexibility
+  
        def hartree_NO(self, Dta):
         """
         Computes the Hartree potential in the AO basis from Natural Orbitals.
@@ -239,21 +237,11 @@ class VeloxchemEngine(Engine):
         ValueError
         If no wavefunction (wfn) object is provided.
         """
-        # For VeloxChem, assume that the density matrix is available as Dta (a NumPy array)
-        # You might also have a method such as self.wfn.Da() to obtain it.
-        # Diagonalize Dta using numpy.linalg.eigh (which returns eigenvalues in ascending order)
         eigvals, C_NO = np.linalg.eigh(Dta)
-        # Sort the eigenvalues and eigenvectors in descending order so that the largest
-        # eigenvalues (most occupied orbitals) come first.
         order = np.argsort(eigvals)[::-1]
         eigvals = eigvals[order]
         C_NO = C_NO[:, order]
-        # Compute the square root of the eigenvalues.
-        # (This gives you the occupation amplitudes.)
         occ = np.sqrt(eigvals)
-        # Reconstruct the “natural orbital coefficient” matrix by scaling each column of C_NO
-        # by the corresponding square-root occupation number.
-        # (Broadcasting multiplies each column by the corresponding occ value.)
         new_CA = C_NO * occ
         # Verify that the reconstructed density (new_CA @ new_CA.T) matches the input density Dta.
         if not np.allclose(new_CA @ new_CA.T, Dta, atol=1e-8):
@@ -272,7 +260,6 @@ class VeloxchemEngine(Engine):
              occ_b = np.sqrt(eigvals_b)
              new_CB = C_NO_b * occ_b
         # Now compute the Hartree potential (for example, the Coulomb matrices) using the
-        # natural orbital coefficient matrices new_CA and new_CB.
         J0 = self.compute_hartree(new_CA, new_CB)
         return J0
        def run_single_point(self, mol, basis, method="HF"):
@@ -302,12 +289,14 @@ class VeloxchemEngine(Engine):
         results = scf_drv.compute(mol, basis)
         # Extract Density, Coefficients, and Orbital Energies
         if self.ref == 1:
-              D = results["D_alpha"]
-              C = results["C_alpha"]
-              e = results["e_alpha"]
+              D = 2*results["D_alpha"]
+              C = 2*results["C_alpha"]
+              e = 2*results["e_alpha"]
         else:
               D = (results["D_alpha"], results["D_beta"])
               C = (results["C_alpha"], results["C_beta"])
               e = (results["e_alpha"], results["e_beta"])
         return D, C, e
  
+
+

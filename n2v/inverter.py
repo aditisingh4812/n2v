@@ -130,8 +130,7 @@ class Inverter(Direct, ZMP, WuYang, PDECO, OC, MRKS):
         # Communicate TO engine
 
         self.eng.set_system(molecule, basis, ref, pbs, **kwargs)
-        self.ref = ref
-
+        self.ref = ref -1 
         self.nalpha = self.eng.nalpha
         self.nbeta = self.eng.nbeta
 
@@ -141,10 +140,12 @@ class Inverter(Direct, ZMP, WuYang, PDECO, OC, MRKS):
 
         # Receive FROM engine
         self.nbf  = self.eng.nbf
+        print("hi self.nbf",self.nbf)
         self.npbs = self.eng.npbs
+        print("hi self.npbs",self.npbs)
         self.v_pbs = np.zeros( (self.npbs) ) if self.ref == 1 \
                                              else np.zeros( 2 * self.npbs )
-
+        print("self.v_pbs",self.v_pbs)
     @classmethod
     def from_wfn( self, wfn, pbs='same' ):
         """
@@ -171,7 +172,7 @@ class Inverter(Direct, ZMP, WuYang, PDECO, OC, MRKS):
         inv.eng.wfn = wfn
 
         return inv
-    def from_scf(self, scf_result,molecule, basis, pbs='same'):
+    def from_scf(self,molecule, basis,scf_result, pbs='same'):
         """
         Generates Inverter directly from scf_drv.
     
@@ -195,7 +196,6 @@ class Inverter(Direct, ZMP, WuYang, PDECO, OC, MRKS):
             ref = 2
         else:
             ref = 1  # Otherwise, it's restricted (RHF)
-    
         self.set_system(
             molecule,
             basis,
@@ -203,28 +203,18 @@ class Inverter(Direct, ZMP, WuYang, PDECO, OC, MRKS):
             ref=ref)
     
         # Assign density matrices
-        if ref ==1:
-            self.Dt =[scf_result['D']]
-        else :
-            self.Dt =[scf_result['D_alpha'], scf_result['D_beta']]  # Include beta density for UHF
+        self.Dt =[scf_result['D_alpha'], scf_result['D_beta']]  # Include beta density for UHF
     
         # Assign molecular orbitals
-        if ref == 1:  # RHF case: Use 'C'
-            self.ct = [scf_result['C']]
-        else:  # UHF case: Use 'C_alpha' and 'C_beta'
-            self.ct = [scf_result['C_alpha'], scf_result['C_beta']]
+        self.ct = [scf_result['C_alpha'], scf_result['C_beta']]
     
         # Assign orbital energies
-        if ref == 1:  # RHF case: Use 'E'
-            self.et = [scf_result['E']]
-        else:  # UHF case: Use 'E_alpha' and 'E_beta'
-            self.et = [scf_result['E_alpha'], scf_result['E_beta']]
+        self.et = [scf_result['E_alpha'], scf_result['E_beta']]
     
         self.eng_str = 'veloxchem'
         self.eng.scf_result = scf_result  # Fixed typo ('ing' → 'inv')
     
         return self
-
     def set_basis_matrices( self ):
         """
         Generate basis dependant matrices
